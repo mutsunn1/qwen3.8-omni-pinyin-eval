@@ -17,12 +17,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_CONFIG, Config, ConfigError
+from .config import Config, ConfigError, default_config_path, load_dotenv
 
 log = logging.getLogger("pinyin_eval")
 
@@ -48,7 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="pinyin-eval",
         description="Qwen3.8-Omni Mandarin pinyin recognition & consistency benchmark",
     )
-    parser.add_argument("--config", default=DEFAULT_CONFIG, help="YAML config path (default: %(default)s)")
+    parser.add_argument("--config", default=default_config_path(),
+                        help="YAML config path (default: $PINYIN_EVAL_CONFIG or %(default)s)")
     parser.add_argument("--root", default=None, help="repo root (default: current directory)")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -461,6 +463,17 @@ def cmd_check(args: argparse.Namespace) -> int:
         "sha256": cfg.config_sha256(),
         "repo_root": str(cfg.repo_root),
     }}
+    env_file = cfg.repo_root / ".env"
+    report["environment"] = {
+        "python": sys.version.split()[0],
+        "env_file": str(env_file),
+        "env_file_exists": env_file.exists(),
+        "config_env_var": os.environ.get("PINYIN_EVAL_CONFIG"),
+        "dotenv_loaded_keys": sorted(
+            key for key in ("DASHSCOPE_API_KEY", "DASHSCOPE_BASE_URL", "PINYIN_EVAL_CONFIG")
+            if os.environ.get(key)
+        ),
+    }
     report["model"] = check_setup(cfg)
     report["dataset"] = {
         "raw_parquet": str(cfg.path("paths.raw_parquet")),
@@ -512,6 +525,9 @@ def cmd_smoke(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # .env in the current directory is loaded before parsing so that
+    # PINYIN_EVAL_CONFIG / DASHSCOPE_* defaults are available everywhere.
+    load_dotenv(Path.cwd() / ".env")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

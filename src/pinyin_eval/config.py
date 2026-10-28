@@ -19,6 +19,47 @@ import yaml
 
 DEFAULT_CONFIG = "configs/base.yaml"
 
+#: environment variable that can override the default config path (see ``.env``)
+CONFIG_ENV_VAR = "PINYIN_EVAL_CONFIG"
+
+
+def load_dotenv(path: str | Path, *, override: bool = False) -> dict[str, str]:
+    """Minimal ``.env`` loader (no external dependency).
+
+    Reads ``KEY=VALUE`` lines, ignores blank lines / ``#`` comments, strips
+    optional ``export`` prefixes and surrounding quotes.  Existing environment
+    variables win unless ``override=True``.  This keeps the local environment,
+    the CLI and the test suite on one single source of truth for credentials.
+    """
+    env_path = Path(path)
+    loaded: dict[str, str] = {}
+    if not env_path.exists():
+        return loaded
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        loaded[key] = value
+        if override or key not in os.environ:
+            os.environ[key] = value
+    return loaded
+
+
+def default_config_path() -> str:
+    """Default config path, overridable with ``PINYIN_EVAL_CONFIG``."""
+    return os.environ.get(CONFIG_ENV_VAR) or DEFAULT_CONFIG
+
 
 class ConfigError(ValueError):
     pass
@@ -46,11 +87,12 @@ class Config:
 
     # -- construction ------------------------------------------------------
     @classmethod
-    def load(cls, path: str | Path = DEFAULT_CONFIG, *, repo_root: str | Path | None = None,
+    def load(cls, path: str | Path | None = None, *, repo_root: str | Path | None = None,
              overrides: dict[str, Any] | None = None) -> Config:
-        config_path = Path(path)
+        root = Path(repo_root) if repo_root is not None else Path.cwd()
+        load_dotenv(root / ".env")
+        config_path = Path(path or default_config_path())
         if not config_path.is_absolute():
-            root = Path(repo_root) if repo_root is not None else Path.cwd()
             config_path = Path(root) / config_path
         if not config_path.exists():
             raise ConfigError(f"config file not found: {config_path}")
@@ -166,4 +208,11 @@ class Config:
         return value
 
 
-__all__ = ["Config", "ConfigError", "DEFAULT_CONFIG"]
+__all__ = [
+    "CONFIG_ENV_VAR",
+    "DEFAULT_CONFIG",
+    "Config",
+    "ConfigError",
+    "default_config_path",
+    "load_dotenv",
+]

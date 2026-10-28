@@ -4,7 +4,8 @@
 
 ## 0. 前置检查清单
 
-- [ ] Python 3.12 环境：`uv sync`
+- [ ] 环境统一：`scripts/setup.sh`（或 `make setup`）已执行，Python 3.12 / `uv.lock` 已就位
+- [ ] `.env` 已从 `.env.example` 创建并填写凭证（或 shell 已 export 同名变量）
 - [ ] `DASHSCOPE_API_KEY` 已配置（百炼 API Key，北京/新加坡地域不同）
 - [ ] `DASHSCOPE_BASE_URL` 已配置为**业务空间**兼容地址：
       `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`
@@ -16,8 +17,9 @@
 ## 1. 环境与连通性
 
 ```bash
-uv sync
-uv run pinyin-eval check
+make setup                        # uv sync --locked + 生成 .env（若缺失）
+# 编辑 .env：DASHSCOPE_API_KEY / DASHSCOPE_BASE_URL
+uv run pinyin-eval check          # 应显示 api_key_present=true
 uv run pinyin-eval smoke          # 1 次真实调用；应返回可解析的 text 与 usage
 ```
 

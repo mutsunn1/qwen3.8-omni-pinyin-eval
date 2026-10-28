@@ -1,5 +1,11 @@
 # Qwen3.8-Omni 普通话音素识别与一致性检测实验框架
 
+<!-- badges -->
+[![CI](https://github.com/mutsunn1/qwen3.8-omni-pinyin-eval/actions/workflows/ci.yml/badge.svg)](https://github.com/mutsunn1/qwen3.8-omni-pinyin-eval/actions/workflows/ci.yml)
+[![Repo](https://img.shields.io/badge/GitHub-qwen3.8--omni--pinyin--eval-181717?logo=github)](https://github.com/mutsunn1/qwen3.8-omni-pinyin-eval)
+[![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](https://docs.astral.sh/uv/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 按 `docs/experiment-design.md`（设计文档冻结快照，原始来源：Obsidian Vault
 `study/Qwen 3.8 omni 音素识别实验设计.md`）实现的 zero-shot 评测框架：
 
@@ -12,31 +18,61 @@
 6160 条 16 kHz 单声道 WAV；4 个 TTS voice × 1540；声调 1–4 各 1540）。
 模型：阿里云百炼 **Qwen3.8-Omni-Flash**（`qwen3.8-omni-flash`）。
 
-> 当前状态：框架已完成并通过 226 个离线测试；`all-mock` 可在无 API key 的情况下跑通
+> 当前状态：框架已完成并通过 232 个离线测试；`all-mock` 可在无 API key 的情况下跑通
 > `prepare-data → build-tasks → generate(mock) → score → report` 全链路。
 > 真实 API 调用尚未执行（本机未配置 `DASHSCOPE_API_KEY` / 业务空间 `DASHSCOPE_BASE_URL`）。
 
 ---
 
-## 1. 快速开始
+## 1. 快速开始（统一环境，克隆即用）
+
+所有操作通过 [`uv`](https://docs.astral.sh/uv/) 管理：Python 版本由 `.python-version`
+固定为 **3.12**，依赖由 `uv.lock` 锁定，环境变量统一放在 `.env`（模板 `.env.example`）。
+不需要手动 `activate` 虚拟环境。
 
 ```bash
-cd "qwen3.8 pinyin"
-uv sync                                   # Python 3.12 + 依赖
+git clone https://github.com/mutsunn1/qwen3.8-omni-pinyin-eval.git
+cd qwen3.8-omni-pinyin-eval
+
+scripts/setup.sh            # 或 make setup：uv sync --locked + 生成 .env + 自检
+# 编辑 .env 填入 DASHSCOPE_API_KEY / DASHSCOPE_BASE_URL（只跑 mock 时可留空）
+
+make mock                   # 离线全链路自测：prepare-data → build-tasks → generate(mock) → score → report
+make test                   # 232 个离线测试
+make lint                   # ruff
+```
+
+等价的显式命令：
+
+```bash
+uv sync --locked                          # 创建 .venv（Python 3.12）并安装锁定依赖
+cp .env.example .env                      # 首次运行时生成；.env 已被 gitignore
 uv run pinyin-eval check                  # 环境 / 数据 / 模型配置自检
 uv run pinyin-eval prepare-data           # 下载 parquet（~100MB）+ 导出音频 + manifest
 uv run pinyin-eval build-tasks --validate # 构造任务 + 检测集 + 消融子集，并校验最小对计数
 uv run pinyin-eval all-mock --audios 40   # 离线全链路自测（mock client，无需 key）
 ```
 
-离线自测产物在 `results/runs/mocksmoke/`：`report.md`、`metrics.csv`、`items.parquet` 等。
+离线自测产物在 `results/runs/<run_id>/`：`report.md`、`metrics.csv`、`items.parquet` 等
+（`data/`、`results/` 已 gitignore，可用命令再生）。
+
+### 统一环境说明
+
+| 项 | 统一方式 |
+|---|---|
+| Python | `.python-version` = 3.12；`pyproject.toml` `requires-python >= 3.12`；uv 自动下载/选择 |
+| 依赖 | `uv.lock` 锁定（`uv sync --locked` 复现）；dev 依赖在 `[dependency-groups].dev` |
+| 环境变量 | `.env`（模板 `.env.example`，gitignore）；`python-dotenv` 语义的最小加载器，shell 变量优先 |
+| 配置入口 | `$PINYIN_EVAL_CONFIG` 或 `--config`；默认 `configs/base.yaml` |
+| 常用命令 | `Makefile`（`make setup/check/data/tasks/mock/test/lint/ci`）+ `scripts/setup.sh` |
+| CI | `.github/workflows/ci.yml`：`uv sync --locked` → ruff → pytest（离线，不需要 API key） |
 
 ## 2. 真实实验（需要阿里云百炼凭证）
 
 ```bash
-export DASHSCOPE_API_KEY="sk-..."          # 百炼 API Key
-# 百炼要求使用“业务空间服务地址”，形如：
-export DASHSCOPE_BASE_URL="https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+# 推荐：把凭证写进 .env（模板见 .env.example），也支持直接 export
+#   DASHSCOPE_API_KEY=sk-...
+#   DASHSCOPE_BASE_URL=https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 
 uv run pinyin-eval smoke                    # 1 次真实调用，验证 key / 模型 id / base_url
 uv run pinyin-eval estimate --tasks all --profile main      # 预估主实验调用量（83,321 次）
@@ -158,7 +194,7 @@ src/pinyin_eval/
   scoring.py cli.py
   data/dataset.py data/minimal_pairs.py
   metrics.py stats.py report.py tasks.py
-tests/                         # 226 个离线测试（无网络/无 key）
+tests/                         # 232 个离线测试（无网络/无 key）
 ```
 
 ## 6. 模型调用细节（百炼 OpenAI 兼容接口）
@@ -177,7 +213,8 @@ tests/                         # 226 个离线测试（无网络/无 key）
 ## 7. 可复现性
 
 * 数据集 commit、mapping CSV sha256、config sha256、prompt 版本、模型 id、调用日期
-  全部写入 `run_manifest.json`；
+  全部写入 `run_manifest.json`；当前 Python/依赖版本可通过 `uv.lock` 与
+  `pinyin-eval check --json` 复核；
 * `generations.jsonl` 为 append-only，按 `request_id` 去重；重复运行同一 run-id 自动续跑；
 * `data/`、`results/` 均为可再生文件（`.gitignore`），任一环节可用 CLI 重建；
 * prompt 全文存于任务清单（`prompt_texts`），提示词变更会改变 `request_id`，
@@ -186,7 +223,7 @@ tests/                         # 226 个离线测试（无网络/无 key）
 ## 8. 测试
 
 ```bash
-uv run pytest                 # 226 passed（离线）
+uv run pytest                 # 232 passed（离线）
 uv run ruff check src tests   # All checks passed
 ```
 
@@ -209,3 +246,12 @@ uv run ruff check src tests   # All checks passed
   其余条件作为消融/一致性分析报告（见 `docs/decisions.md`）。
 * `--include-wide-nasal` 可把 ian/iang、uan/uang 纳入前后鼻最小对（52 对），
   但会偏离设计文档的 40 对口径，默认关闭。
+
+## 10. 引用与许可
+
+* 代码：[MIT License](LICENSE)。
+* 数据：[`HaitongSUN/prosodic-abx`](https://huggingface.co/datasets/HaitongSUN/prosodic-abx)
+  （`mandarin_tone_syn` config，**CC-BY-4.0**，arXiv:2604.02102）；本仓库内
+  `data/mapping/mandarin_tone_syn_target_mapping.csv` 为基于该数据集的 target→initial/final
+  映射表，使用/再分发时请保留数据集署名与许可。
+* 模型：阿里云百炼 Qwen3.8-Omni-Flash，使用时遵循[阿里云百炼服务条款](https://help.aliyun.com/zh/model-studio/)。
