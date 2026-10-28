@@ -21,7 +21,7 @@ from typing import Any
 from .client import BaseClient, ChatRequest, ChatResponse, check_setup, create_client
 from .config import Config
 from .data.dataset import ensure_noisy_for
-from .prompts import PROMPT_VERSION, describe_prompts, task_kind
+from .prompts import PROMPT_VERSION, describe_prompts
 from .records import GenerationRecord, TaskItem
 from .tasks import (
     condition_id_for,
@@ -60,7 +60,8 @@ class RequestPlan:
     media_rel: str
     media_path: str
     prompt_text: str
-    task_kind: str
+    task_type: str
+    system_prompt: str
     meta: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -81,7 +82,7 @@ class RequestPlan:
 
 def _task_meta(task: TaskItem) -> dict[str, Any]:
     return {
-        "task_kind": task_kind(task.prompt_condition),
+        "task_type": task.task_type,
         "gold_initial": task.gold_initial,
         "gold_final": task.gold_final,
         "gold_tone": task.gold_tone,
@@ -136,7 +137,8 @@ def build_request_plan(
                 media_rel=media_rel,
                 media_path=media_path,
                 prompt_text=task.prompt_texts[form],
-                task_kind=task_kind(task.prompt_condition),
+                task_type=task.task_type,
+                system_prompt=task.system_prompt,
                 meta=_task_meta(task),
             )
     return sorted(plans.values(), key=lambda p: (p.condition_id, p.experiment, p.item_id, p.request_id))
@@ -228,7 +230,14 @@ def build_manifest(
             "thinking_on": cfg.get("model.thinking_on_reasoning_effort"),
             "thinking_off": cfg.get("model.thinking_off_reasoning_effort"),
         },
-        "prompts": {"version": PROMPT_VERSION, "notes": describe_prompts()["notes"]},
+        "prompts": {
+            "version": PROMPT_VERSION,
+            "notes": describe_prompts()["notes"],
+            "system_prompt": describe_prompts()["system_prompt"],
+            "system_prompt_sha256": __import__("hashlib").sha256(
+                describe_prompts()["system_prompt"].encode()
+            ).hexdigest()[:16],
+        },
         "task_sources": list(task_sources),
         "item_subset_source": item_subset_source,
         "conditions": [dict(c) for c in conditions],
@@ -416,6 +425,7 @@ def run_generation(
             prompt_text=plan.prompt_text,
             output_form=plan.output_form,
             thinking=plan.thinking,
+            system_prompt=plan.system_prompt,
             meta=plan.meta,
         )
         return client.generate(request)

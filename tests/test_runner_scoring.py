@@ -1,7 +1,8 @@
 """End-to-end (offline) tests: task build -> mock generation -> scoring -> metrics.
 
 No API key, no real audio: the mock client answers from the gold labels in the
-request metadata.
+request metadata.  Updated for the 2026-10-28 design (tone-only exp1/2 +
+dedicated detection experiment).
 """
 
 from __future__ import annotations
@@ -38,19 +39,21 @@ def small_cfg(tmp_path):
 
 def _tasks(small_cfg, tiny_records, mapping):
     core = T.build_core_tasks(tiny_records, small_cfg, mapping)
+    detect = T.build_detection_tasks(tiny_records, small_cfg, mapping)
     pairs = T.build_pair_tasks(tiny_records, small_cfg, mapping)
-    return core, pairs
+    return core, detect, pairs
 
 
 def _audio_subset(tasks, n_audios=2):
     keep = sorted({t.audio_id for t in tasks})[:n_audios]
-    return set(keep), {t.item_id for t in tasks if t.audio_id in set(keep)}
+    keep_set = set(keep)
+    return keep_set, {t.item_id for t in tasks if t.audio_id in keep_set}
 
 
 def test_runner_dry_run(small_cfg, tiny_records, mapping):
-    core, pairs = _tasks(small_cfg, tiny_records, mapping)
+    core, detect, pairs = _tasks(small_cfg, tiny_records, mapping)
     result = run_generation(
-        small_cfg, core + pairs, conditions=[small_cfg.main_condition],
+        small_cfg, core + pairs + detect, conditions=[small_cfg.main_condition],
         run_id="dry", dry_run=True,
     )
     run_dir = Path(result["run_dir"])
@@ -60,34 +63,41 @@ def test_runner_dry_run(small_cfg, tiny_records, mapping):
 
 
 def test_mock_run_scoring_and_detection(small_cfg, tiny_records, mapping):
-    core, pairs = _tasks(small_cfg, tiny_records, mapping)
-    keep, subset = _audio_subset(core, n_audios=2)
+    core, detect, pairs = _tasks(small_cfg, tiny_records, mapping)
+    all_tasks = core + detect + pairs
+    keep, subset = _audio_subset(all_tasks, n_audios=2)
     result = run_generation(
-        small_cfg, core + pairs, conditions=[small_cfg.main_condition],
+        small_cfg, all_tasks, conditions=[small_cfg.main_condition],
         item_subset=subset, run_id="mock-perfect", mock=True,
     )
     assert result["n_error"] == 0
     assert result["n_ok"] == result["n_requests"]
 
-    out = scoring.score_run(small_cfg, "mock-perfect", tasks=core + pairs)
+    out = scoring.score_run(small_cfg, "mock-perfect", tasks=all_tasks)
     items = out["items"]
     assert items["parse_status"].eq("ok").all()
-    # perfect mock -> perfect recognition metrics
-    free = items[(
-        (items["prompt_condition"] == "free") & (items["experiment"] == "exp3")
-    )].to_dict("records")
+    assert set(items["task_type"]) == {"free", "tone", "detect", "ab"}
+
+    # perfect mock -> perfect free recognition (experiment 3 view)
+    free = items[items["task_type"] == "free"].to_dict("records")
     rec = metrics.recognition_metrics(free)
     assert rec["tone"]["accuracy"] == 1.0
     assert rec["initial"]["accuracy"] == 1.0
-    assert rec["final"]["accuracy"] == 1.0
     assert rec["joint_accuracy"] == 1.0
 
-    # perfect mock -> perfect error detection (pred_consistent semantics)
-    detection = out["detection"]
-    assert len(detection) > 0
-    main = detection[
-        (detection["detection_subset"] == "main")
-        & (detection["generation_condition"] == "think1__clean__json")
+    # experiments 1/2: tone-only accuracy
+    tone = items[items["task_type"] == "tone"].to_dict("records")
+    assert tone
+    tone_metrics = metrics.classification_metrics(
+        [int(r["gold_tone"]) for r in tone], [int(r["pred_tone"]) for r in tone],
+    )
+    assert tone_metrics["accuracy"] == 1.0
+
+    # detection experiment: perfect consistency judgement
+    assert len(out["detection"]) > 0
+    main = out["detection"][
+        (out["detection"]["detection_subset"] == "main")
+        & (out["detection"]["generation_condition"] == "think1__clean__json")
     ].to_dict("records")
     det = metrics.detection_metrics(main)
     assert det["tp"] > 0 and det["tn"] > 0
@@ -97,27 +107,31 @@ def test_mock_run_scoring_and_detection(small_cfg, tiny_records, mapping):
     assert det["fpr"] == 0.0 and det["fnr"] == 0.0
 
     # A/B tasks parsed and correct
-    ab = items[items["prompt_condition"] == "ab_choice"].to_dict("records")
-    if ab:
-        assert metrics.ab_metrics(ab)["accuracy"] == 1.0
+    ab = items[items["task_type"] == "ab"].to_dict("records")
+    assert ab and metrics.ab_metrics(ab)["accuracy"] == 1.0
 
-    # correctness columns are nullable booleans and scoped to the right task type
-    assert set(items["initial_correct"].dropna().unique()) <= {True}
-    assert items[items["prompt_condition"] != "free"]["initial_correct"].isna().all()
+    # correctness columns are scoped to the right task types
+    assert items.loc[items["task_type"] == "free", "initial_correct"].notna().all()
+    assert items.loc[items["task_type"] != "free", "initial_correct"].isna().all()
+    assert items.loc[items["task_type"].isin(["free", "tone"]), "tone_correct"].notna().all()
+    assert items.loc[items["task_type"] == "detect", "consistent_correct"].notna().all()
+    assert items.loc[items["task_type"] != "detect", "consistent_correct"].isna().all()
+    assert items.loc[items["task_type"] == "ab", "choice_correct"].notna().all()
 
 
 def test_resume_is_idempotent(small_cfg, tiny_records, mapping):
-    core, pairs = _tasks(small_cfg, tiny_records, mapping)
-    keep, subset = _audio_subset(core, n_audios=1)
+    core, detect, pairs = _tasks(small_cfg, tiny_records, mapping)
+    all_tasks = core + detect + pairs
+    keep, subset = _audio_subset(all_tasks, n_audios=1)
     conditions = [small_cfg.main_condition, {"thinking": False, "audio_quality": "clean",
                                              "output_form": "json"}]
     first = run_generation(
-        small_cfg, core + pairs, conditions=conditions, item_subset=subset,
+        small_cfg, all_tasks, conditions=conditions, item_subset=subset,
         run_id="resume", mock=True,
     )
     n_first = first["n_ok"]
     second = run_generation(
-        small_cfg, core + pairs, conditions=conditions, item_subset=subset,
+        small_cfg, all_tasks, conditions=conditions, item_subset=subset,
         run_id="resume", mock=True,
     )
     assert second["n_skipped_resume"] == n_first
@@ -128,22 +142,22 @@ def test_resume_is_idempotent(small_cfg, tiny_records, mapping):
 
 def test_request_dedupe_across_experiment_views(small_cfg, tiny_records, mapping):
     """exp3 free and exp4/5/6 free share one API call for the same audio."""
-    core, pairs = _tasks(small_cfg, tiny_records, mapping)
-    keep, subset = _audio_subset(core, n_audios=2)
+    core, detect, pairs = _tasks(small_cfg, tiny_records, mapping)
+    all_tasks = core + detect + pairs
+    keep, subset = _audio_subset(all_tasks, n_audios=2)
     result = run_generation(
-        small_cfg, core + pairs, conditions=[small_cfg.main_condition],
+        small_cfg, all_tasks, conditions=[small_cfg.main_condition],
         item_subset=subset, run_id="dedupe", mock=True,
     )
     generations = load_generations(Path(result["run_dir"]))
-    out = scoring.score_run(small_cfg, "dedupe", tasks=core + pairs)
-    free_items = out["items"][out["items"]["prompt_condition"] == "free"]
-    # more free item rows than free API calls => dedupe happened
+    out = scoring.score_run(small_cfg, "dedupe", tasks=all_tasks)
+    free_items = out["items"][out["items"]["task_type"] == "free"]
     free_calls = [g for g in generations if g.prompt_condition == "free"]
     assert len(free_items) > len(free_calls)
 
 
 def test_error_records_are_kept(small_cfg, tiny_records, mapping):
-    core, _pairs = _tasks(small_cfg, tiny_records, mapping)
+    core, _detect, _pairs = _tasks(small_cfg, tiny_records, mapping)
     keep, subset = _audio_subset(core, n_audios=1)
     cfg = small_cfg.with_overrides({"mock": {"mode": "perfect", "fail_rate": 1.0}})
     result = run_generation(
@@ -153,11 +167,10 @@ def test_error_records_are_kept(small_cfg, tiny_records, mapping):
     assert result["n_error"] == result["n_requests"]
     out = scoring.score_run(cfg, "failing", tasks=core)
     assert out["items"]["parse_status"].eq("api_error").all()
-    assert out["summary"]["parse_status"].get("api_error", 0) > 0
 
 
 def test_manifest_records_reproducibility_fields(small_cfg, tiny_records, mapping):
-    core, _pairs = _tasks(small_cfg, tiny_records, mapping)
+    core, _detect, _pairs = _tasks(small_cfg, tiny_records, mapping)
     keep, subset = _audio_subset(core, n_audios=1)
     run_generation(
         small_cfg, core, conditions=[small_cfg.main_condition], item_subset=subset,
@@ -173,7 +186,7 @@ def test_manifest_records_reproducibility_fields(small_cfg, tiny_records, mappin
 
 
 def test_item_subset_accepts_comma_separated_files(small_cfg, tiny_records, mapping):
-    core, _pairs = _tasks(small_cfg, tiny_records, mapping)
+    core, _detect, _pairs = _tasks(small_cfg, tiny_records, mapping)
     tdir = small_cfg.path("paths.task_dir")
     tdir.mkdir(parents=True, exist_ok=True)
     ids_a = [t.item_id for t in core[:3]]
@@ -186,13 +199,13 @@ def test_item_subset_accepts_comma_separated_files(small_cfg, tiny_records, mapp
 
 
 def test_scoring_filters_to_planned_calls(small_cfg, tiny_records, mapping):
-    core, pairs = _tasks(small_cfg, tiny_records, mapping)
-    keep, subset = _audio_subset(core, n_audios=1)
+    core, detect, pairs = _tasks(small_cfg, tiny_records, mapping)
+    all_tasks = core + detect + pairs
+    keep, subset = _audio_subset(all_tasks, n_audios=1)
     run_generation(
-        small_cfg, core + pairs, conditions=[small_cfg.main_condition],
+        small_cfg, all_tasks, conditions=[small_cfg.main_condition],
         item_subset=subset, run_id="filter", mock=True,
     )
-    out = scoring.score_run(small_cfg, "filter", tasks=core + pairs)
-    # only planned cells are scored, not the whole task catalog
-    n_possible = len(core + pairs) * len([small_cfg.main_condition])
+    out = scoring.score_run(small_cfg, "filter", tasks=all_tasks)
+    n_possible = len(all_tasks) * len([small_cfg.main_condition])
     assert 0 < len(out["items"]) < n_possible

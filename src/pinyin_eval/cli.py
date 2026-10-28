@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # estimate -----------------------------------------------------------
     p = sub.add_parser("estimate", help="count API calls / audio seconds for a run plan")
-    p.add_argument("--tasks", default="all", choices=["core", "pairs", "all"])
+    p.add_argument("--tasks", default="all", choices=["core", "pairs", "detect", "all"])
     p.add_argument("--profile", default="main", choices=["main", "ablation", "all"])
     p.add_argument("--conditions", default="main", choices=["main", "all"])
     p.add_argument("--condition", action="append", default=None, metavar="THINK:QUALITY:FORM")
@@ -84,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # generate -----------------------------------------------------------
     p = sub.add_parser("generate", help="run model generations with resume support")
-    p.add_argument("--tasks", default="all", choices=["core", "pairs", "all"])
+    p.add_argument("--tasks", default="all", choices=["core", "pairs", "detect", "all"])
     p.add_argument("--profile", default="main", choices=["main", "ablation"],
                    help="main = full task catalog; ablation = fixed 256-item subsets")
     p.add_argument("--item-ids", default=None, help="explicit item-id list file (overrides --profile)")
@@ -167,6 +167,11 @@ def _load_task_lists(cfg: Config, which: str):
         if not path.exists():
             raise SystemExit(f"{path} missing; run `pinyin-eval build-tasks` first")
         lists.extend(load_tasks(path))
+    if which in ("detect", "all"):
+        path = tdir / "detection.jsonl"
+        if not path.exists():
+            raise SystemExit(f"{path} missing; run `pinyin-eval build-tasks` first")
+        lists.extend(load_tasks(path))
     return lists
 
 
@@ -184,6 +189,8 @@ def _task_sources(cfg: Config, which: str) -> list[str]:
         sources.append(_repo_relative(cfg, tdir / "core.jsonl"))
     if which in ("pairs", "all"):
         sources.append(_repo_relative(cfg, tdir / "pairs.jsonl"))
+    if which in ("detect", "all"):
+        sources.append(_repo_relative(cfg, tdir / "detection.jsonl"))
     return sources
 
 
@@ -223,7 +230,8 @@ def _load_item_subset(cfg: Config, args: argparse.Namespace, tasks: Sequence[Any
     task_ids = {t.item_id for t in tasks}
     selected: set[str] = set()
     sources: list[str] = []
-    for name in ("ablation_core_items.txt", "ablation_pairs_items.txt"):
+    for name in ("ablation_core_items.txt", "ablation_detection_items.txt",
+                 "ablation_pairs_items.txt"):
         path = _task_dir(cfg) / name
         if path.exists():
             ids = set(load_item_ids(path)) & task_ids
@@ -267,6 +275,7 @@ def cmd_build_tasks(args: argparse.Namespace) -> int:
     from .tasks import (
         build_core_tasks,
         build_detection_sets,
+        build_detection_tasks,
         build_pair_tasks,
         sample_ablation,
         summarize_tasks,
@@ -282,12 +291,15 @@ def cmd_build_tasks(args: argparse.Namespace) -> int:
 
     core = build_core_tasks(records, cfg, mapping)
     write_tasks(core, tdir / "core.jsonl")
-    detection = build_detection_sets(core, cfg)
+    detect = build_detection_tasks(records, cfg, mapping)
+    write_tasks(detect, tdir / "detection.jsonl")
+    detection = build_detection_sets(detect, cfg)
     detection.to_csv(tdir / "detection_sets.csv", index=False)
     print("core tasks:", json.dumps(summarize_tasks(core), ensure_ascii=False, indent=1))
+    print("detection tasks:", json.dumps(summarize_tasks(detect), ensure_ascii=False, indent=1))
     print("detection sets:", detection.groupby("subset").size().to_dict())
 
-    pairs: list[Any] = []
+    pairs = []
     if not args.skip_pairs:
         wide = bool(args.include_wide_nasal or cfg.get("tasks.minimal_pairs.include_wide_nasal", False))
         pair_objs = build_all_pairs(records, mapping, include_wide_nasal=wide)
@@ -306,12 +318,16 @@ def cmd_build_tasks(args: argparse.Namespace) -> int:
                 return 1
             print("minimal-pair counts match the design document ✓")
 
-    selection = sample_ablation(cfg, core, pairs, detection_sets=detection)
-    write_item_ids(selection["core"], tdir / "ablation_core_items.txt")  # type: ignore[arg-type]
+    selection = sample_ablation(cfg, core, pairs, detect, detection_sets=detection)
+    write_item_ids(selection["core"], tdir / "ablation_core_items.txt")
+    write_item_ids(selection["detect"], tdir / "ablation_detection_items.txt")
     if pairs:
-        write_item_ids(selection["pairs"], tdir / "ablation_pairs_items.txt")  # type: ignore[arg-type]
+        write_item_ids(selection["pairs"], tdir / "ablation_pairs_items.txt")
         print("ablation pair instances:", json.dumps(selection["pair_instance_summary"], ensure_ascii=False))
-    print("ablation core items:", len(selection["core"]))
+    print(
+        f"ablation items: core={len(selection['core'])} "
+        f"detect={len(selection['detect'])} pairs={len(selection['pairs'])}"
+    )
     print("task dir:", tdir)
     return 0
 
@@ -349,7 +365,8 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     subset: set[str] | None = None
     if args.profile == "ablation":
         subset = set()
-        for name in ("ablation_core_items.txt", "ablation_pairs_items.txt"):
+        for name in ("ablation_core_items.txt", "ablation_detection_items.txt",
+                     "ablation_pairs_items.txt"):
             path = _task_dir(cfg) / name
             if path.exists():
                 subset.update(load_item_ids(path))
@@ -420,7 +437,7 @@ def cmd_all_mock(args: argparse.Namespace) -> int:
 
     cfg = load_config(args)
     tdir = _task_dir(cfg)
-    if not (tdir / "core.jsonl").exists() or not (tdir / "pairs.jsonl").exists():
+    if not all((tdir / name).exists() for name in ("core.jsonl", "pairs.jsonl", "detection.jsonl")):
         print("task catalogs missing; running build-tasks first ...")
         if cmd_build_tasks(args) != 0:
             return 1
@@ -428,18 +445,18 @@ def cmd_all_mock(args: argparse.Namespace) -> int:
     keep = {r.audio_id for r in records[: args.audios]}
     core = load_tasks(tdir / "core.jsonl")
     pairs = load_tasks(tdir / "pairs.jsonl")
-    subset = {t.item_id for t in core if t.audio_id in keep} | {
-        t.item_id for t in pairs if t.audio_id in keep
-    }
+    detect = load_tasks(tdir / "detection.jsonl")
+    all_tasks = core + pairs + detect
+    subset = {t.item_id for t in all_tasks if t.audio_id in keep}
     conditions = cfg.all_conditions() if args.conditions == "all" else [cfg.main_condition]
     run_id = args.run_id or None
     result = run_generation(
-        cfg, core + pairs, conditions=conditions, item_subset=subset,
+        cfg, all_tasks, conditions=conditions, item_subset=subset,
         run_id=run_id, mock=True, tag="mock",
         task_sources=_task_sources(cfg, "all"),
     )
     run_id = result["run_id"]
-    scored = score_run(cfg, run_id, tasks=core + pairs)
+    scored = score_run(cfg, run_id, tasks=all_tasks)
     print(json.dumps(scored["summary"], ensure_ascii=False, indent=2))
     try:
         from .report import write_report
@@ -484,8 +501,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     }
     tdir = _task_dir(cfg)
     counts: dict[str, Any] = {}
-    for name in ("core.jsonl", "pairs.jsonl", "detection_sets.csv",
-                 "ablation_core_items.txt", "ablation_pairs_items.txt"):
+    for name in ("core.jsonl", "pairs.jsonl", "detection.jsonl", "detection_sets.csv",
+                 "ablation_core_items.txt", "ablation_detection_items.txt",
+                 "ablation_pairs_items.txt"):
         path = tdir / name
         counts[name] = path.stat().st_size if path.exists() else None
     report["tasks"] = counts
@@ -493,6 +511,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         report["n_audio"] = len(load_audio_records(cfg))
         report["n_core_tasks"] = len(load_tasks(tdir / "core.jsonl"))
         report["n_pair_tasks"] = len(load_tasks(tdir / "pairs.jsonl"))
+        report["n_detection_tasks"] = len(load_tasks(tdir / "detection.jsonl"))
     except Exception as exc:  # noqa: BLE001 - status command should not crash
         report["data_error"] = str(exc)
     if args.json:

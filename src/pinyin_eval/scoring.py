@@ -125,6 +125,7 @@ def _make_result(
         experiment=task.experiment,
         prompt_condition=task.prompt_condition,
         condition_id=condition_id,
+        task_type=task.task_type,
         thinking=bool(condition["thinking"]),
         audio_quality=str(condition["audio_quality"]),
         output_form=str(condition["output_form"]),
@@ -214,7 +215,7 @@ def build_item_results(
             if generation is not None and not generation.error and generation.response_text.strip():
                 parsed = parse_response(
                     generation.response_text,
-                    prompt_condition=task.prompt_condition,
+                    task_type=task.task_type,
                     output_form=form,
                     normalizer=normalizer,
                 )
@@ -236,7 +237,15 @@ def build_item_results(
 
 
 def attach_correctness(df: pd.DataFrame) -> pd.DataFrame:
-    """Add per-dimension correctness columns (NA when the task does not ask)."""
+    """Add per-dimension correctness columns (NA when the task does not ask).
+
+    Task types map to the design's output schemas:
+
+    * ``free``   -> initial / final / tone / joint correctness (experiment 3, 4-6 free);
+    * ``tone``   -> tone correctness only (experiments 1/2 and target conditions);
+    * ``detect`` -> consistency correctness only (detection experiment);
+    * ``ab``     -> A/B choice correctness (experiments 4-6).
+    """
     if df.empty:
         return df
     out = df.copy()
@@ -248,17 +257,10 @@ def attach_correctness(df: pd.DataFrame) -> pd.DataFrame:
     pred_final = out["pred_final"].tolist()
     pred_tone = out["pred_tone"].tolist()
     consistent_gold = out["consistent_gold"].tolist()
-    # NOTE: numeric columns loaded from the row list may carry NaN for None
     pred_consistent = out["pred_consistent"].tolist()
     correct_choice = out["correct_choice"].tolist()
     pred_choice = out["pred_choice"].tolist()
 
-    initial_correct: list[Any] = []
-    final_correct: list[Any] = []
-    tone_correct: list[Any] = []
-    joint_correct: list[Any] = []
-    consistent_correct: list[Any] = []
-    choice_correct: list[Any] = []
     def _missing(value: Any) -> bool:
         if value is None:
             return True
@@ -267,6 +269,12 @@ def attach_correctness(df: pd.DataFrame) -> pd.DataFrame:
         except (TypeError, ValueError):
             return False
 
+    initial_correct: list[Any] = []
+    final_correct: list[Any] = []
+    tone_correct: list[Any] = []
+    joint_correct: list[Any] = []
+    consistent_correct: list[Any] = []
+    choice_correct: list[Any] = []
     for i in range(len(out)):
         valid = ok[i]
         i_ok = valid and not _missing(pred_initial[i]) and gold_initial[i] == pred_initial[i]
@@ -298,17 +306,19 @@ def attach_correctness(df: pd.DataFrame) -> pd.DataFrame:
     out["consistent_correct"] = pd.array(consistent_correct, dtype="boolean")
     out["choice_correct"] = pd.array(choice_correct, dtype="boolean")
 
-    is_free = out["prompt_condition"].eq("free")
-    is_consistency = out["prompt_condition"].isin(["correct_target", "wrong_target"])
-    is_ab = out["prompt_condition"].eq("ab_choice")
+    tt = out["task_type"].astype(str) if "task_type" in out.columns else ""
+    is_free = tt.eq("free") if hasattr(tt, "eq") else (tt == "free")
+    is_tone = tt.eq("tone") if hasattr(tt, "eq") else (tt == "tone")
+    is_detect = tt.eq("detect") if hasattr(tt, "eq") else (tt == "detect")
+    is_ab = tt.eq("ab") if hasattr(tt, "eq") else (tt == "ab")
 
-    # free-recognition dimensions exist only for the free condition
+    # initial/final/joint exist only for free recognition
     for col in ("initial_correct", "final_correct", "joint_correct"):
         out.loc[~is_free, col] = pd.NA
-    # consistency tasks report a true-tone answer; keep it separate from free tone
-    out["consistency_tone_correct"] = out["tone_correct"].where(is_consistency, pd.NA)
-    out.loc[~is_free, "tone_correct"] = pd.NA
-    out.loc[~is_consistency, "consistent_correct"] = pd.NA
+    # tone is measured for free recognition and for the tone-only tasks
+    out.loc[~(is_free | is_tone), "tone_correct"] = pd.NA
+    out["consistency_tone_correct"] = pd.NA  # kept for schema compatibility
+    out.loc[~is_detect, "consistent_correct"] = pd.NA
     out.loc[~is_ab, "choice_correct"] = pd.NA
     return out
 
@@ -336,12 +346,11 @@ def build_detection_rows(
     *,
     detection_sets: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Pair exp1 negatives with exp2 positives at the same generation condition.
+    """Pair consistent (negative) and inconsistent (positive) detection claims.
 
-    Detection compares the model's consistency judgement on a *consistent* claim
-    (exp1, correct target prompt) with an *inconsistent* claim (exp2, wrong target
-    prompt).  The generation dimensions (thinking / audio quality / output form)
-    must match, but the prompt conditions differ by design.
+    Both claims belong to the dedicated detection experiment (prompt condition
+    ``detect``) and are replayed under the same generation condition
+    (thinking / audio quality / output form).
     """
     if items_df.empty:
         return pd.DataFrame()
@@ -409,8 +418,8 @@ def score_run(
         # task catalog in memory when data/manifests/tasks/detection_sets.csv is absent
         from .tasks import build_detection_sets
 
-        has_core = {"exp1", "exp2"} <= set(items["experiment"].unique())
-        if has_core:
+        has_detect = "detect" in set(items["experiment"].unique())
+        if has_detect:
             detection_sets = build_detection_sets(task_list, cfg)
             detection = build_detection_rows(cfg, items, detection_sets=detection_sets)
 

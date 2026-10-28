@@ -49,6 +49,7 @@ class ChatRequest:
     prompt_text: str
     output_form: str
     thinking: bool
+    system_prompt: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -156,7 +157,7 @@ class MockClient(BaseClient):
     # -- answer synthesis --------------------------------------------------
     def _answer(self, request: ChatRequest) -> str:
         meta = request.meta
-        kind = meta.get("task_kind", "free")
+        kind = meta.get("task_type") or meta.get("task_kind", "free")
         gold_initial = meta.get("gold_initial", "")
         gold_final = meta.get("gold_final", "")
         gold_tone = int(meta.get("gold_tone", 1) or 1)
@@ -174,7 +175,11 @@ class MockClient(BaseClient):
                 consistent = not consistent
             correct_choice = "B" if correct_choice == "A" else "A"
 
-        if kind == "consistency":
+        if kind == "tone":
+            if request.output_form == "json":
+                return json.dumps({"tone": gold_tone})
+            return f"声调={gold_tone}"
+        if kind == "detect":
             consistent = bool(consistent)
             if request.output_form == "json":
                 return json.dumps({"consistent": consistent, "tone": gold_tone})
@@ -187,7 +192,7 @@ class MockClient(BaseClient):
                 )
             initial = gold_initial if gold_initial else "无"
             return f"声母={initial}\n韵母={gold_final}\n声调={gold_tone}"
-        if kind == "ab_choice":
+        if kind == "ab":
             choice = correct_choice or self.rng.choice(["A", "B"])
             if request.output_form == "json":
                 return json.dumps({"choice": choice})
@@ -246,18 +251,20 @@ class DashScopeClient(BaseClient):
     # -- request construction ---------------------------------------------
     def build_payload(self, request: ChatRequest) -> dict[str, Any]:
         audio_uri = encode_audio_data_uri(request.audio_path)
+        messages: list[dict[str, Any]] = []
+        if request.system_prompt:
+            messages.append({"role": "system", "content": request.system_prompt})
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "input_audio",
+                 "input_audio": {"data": audio_uri, "format": "wav"}},
+                {"type": "text", "text": request.prompt_text},
+            ],
+        })
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_audio",
-                         "input_audio": {"data": audio_uri, "format": "wav"}},
-                        {"type": "text", "text": request.prompt_text},
-                    ],
-                }
-            ],
+            "messages": messages,
             "modalities": self.modalities,
             "temperature": self.temperature,
             "top_p": self.top_p,

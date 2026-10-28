@@ -82,19 +82,23 @@ generation:
   max_output_tokens: 256
 
 tasks:
-  # 实验二：每个样本 5 个错误变体 = 2 改声母 + 2 改韵母 + 1 改声调
+  # 实验二（2026-10-28 设计更新）：5 个错误无调拼音，只改声母或韵母，不含改声调。
+  # 组成 = 2 改声母 + 2 改韵母 + 1 额外（按音频确定性选择改声母或改韵母）。
   exp2:
     n_initial_variants: 2
     n_final_variants: 2
-    n_tone_variants: 1
-    # 声调变体是否在给定目标中写入声调数字（否则“改声调”不可能成立）
-    tone_variant_keeps_segment: true
+    n_extra_segmental_variants: 1
   ablation:
     # 消融每个条件 256 条，按 4 voice x 4 tone x 16 分层（设计文档 四）
     items_per_condition: 256
     strata_per_voice_tone: 16
+  # 检测实验（2026-10-28 新增）：给定 target（无调）+ target_tone，只输出一致性。
   detection:
-    # 主检测集：每个音频 1 负类 + 1 正类（2 改声母 / 2 改韵母 / 1 改声调 分层随机抽 1）
+    # 每个音频：1 个一致样本 + 5 个不一致变体（2 改声母 / 2 改韵母 / 1 改声调）
+    n_initial_variants: 2
+    n_final_variants: 2
+    n_tone_variants: 1
+    # 主检测集：每个音频 1 负类 + 1 正类（按 2/2/1 权重分层随机抽 1）
     strata_weights: {initial: 2, final: 2, tone: 1}
     # 分类型平衡子集：initial / final / tone 各 6160 正 + 6160 负
     subsets: [main, initial, final, tone]

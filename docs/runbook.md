@@ -12,7 +12,7 @@
 - [ ] 账号已开通 Qwen3.8-Omni-Flash（或改 `configs/base.yaml: model.model` 为可用模型 id）
 - [ ] 磁盘 ≥ 3 GB（parquet 100MB + 音频 60MB + 任务清单 230MB + 结果）
 - [ ] `configs/base.yaml` 已复核：主实验条件、消融抽样、并发/限流、模型参数
-- [ ] 已知晓调用预算：主实验 ≈ 83,321 次、消融 ≈ 88,952 次（见 README 第 2 节）
+- [ ] 已知晓调用预算：主实验 ≈ 107,896 次、消融 ≈ 96,960 次，合计 ≈ 204,856 次（见 README 第 2 节）
 
 ## 1. 环境与连通性
 
@@ -44,9 +44,11 @@ uv run pinyin-eval build-tasks --validate
 
 - `prepare-data` 输出 `n_audio=6160, n_voices=4, tones 各 1540, sample_rates=[16000]`；
 - `build-tasks --validate` 输出 `minimal-pair counts match the design document ✓`；
-- 任务清单行数：`core.jsonl=43056`、`pairs.jsonl=94592`；
+- 任务清单行数（v2 设计）：`core.jsonl=43056`、`detection.jsonl=36896`、`pairs.jsonl=76448`；
 - 检测集：`main=6160, initial=6128, final=6160, tone=6160`（initial 的 32 条缺口原因见
-  `docs/decisions.md` §2.3）。
+  `docs/decisions.md` §2.3）；
+- 消融子集：`ablation_core_items.txt=768`、`ablation_detection_items.txt=1536`、
+  `ablation_pairs_items.txt=10752`。
 
 ## 3. 试跑（Pilot，强烈建议）
 
@@ -63,7 +65,8 @@ Pilot 验收指标（`results/runs/pilot1/score_summary.json`）：
 
 - 每个条件的 `ok / n` 比例 ≥ 95%（否则先修 prompt 或处理 JSON 模式问题）；
 - `parse_failures.jsonl` 中人工抽查 10 条，确认不是系统性解析问题；
-- JSON 条件应几乎全部可解析；free-text 条件应能抽取 `一致性/声母/韵母/声调/选择`；
+- JSON 条件应几乎全部可解析；free-text 条件应能抽取新标记
+  `声调=`、`声母=…；韵母=…；声调=`、`一致=是/否`、`选择=A/B`；
 - thinking-on 条件应在 `generations.jsonl` 的 `reasoning_text` 中看到思考内容；
 - 抽样核对 `generations.jsonl`：`media_path` 指向干净/噪声文件正确、`condition_id` 正确。
 
@@ -76,7 +79,7 @@ Pilot 验收指标（`results/runs/pilot1/score_summary.json`）：
 uv run pinyin-eval generate --tasks all --profile main --run-id main-v1 --tag main
 ```
 
-- 预期 83,321 次调用；按 `concurrency=4`、单次 3–10 s 估计约 18–24 小时；
+- 预期 107,896 次调用（含检测实验）；按 `concurrency=4`、单次 3–10 s 估计约 30–50 小时；
 - 建议在 `tmux`/后台 job 中运行；中断后原命令 + 原 `--run-id` 重跑即续跑；
 - 运行中可随时查看 `results/runs/main-v1/generations.jsonl` 计数与
   `run_manifest.json`（结束前 `status=running`）。
@@ -88,7 +91,7 @@ uv run pinyin-eval generate --tasks all --profile ablation --conditions all \
   --run-id ablation-v1 --tag ablation
 ```
 
-- 预期 88,952 次调用；
+- 预期 96,960 次调用；
 - 该 run 自带主条件（think1/clean/json）在消融子集上的重复调用，用于与其余条件**配对**
   比较；若想省预算可改为 7 个条件（去掉 `--condition` 中的主条件），但需自行保证
   report 能取到主条件基线；
@@ -109,7 +112,7 @@ uv run pinyin-eval report --run-id ablation-v1
 | 文件 | 说明 |
 |---|---|
 | `items.parquet` | 每条 (task item × condition) 的解析结果与正确性 |
-| `detection_rows.parquet` | 实验一+二检测分析的 neg/pos 行 |
+| `detection_rows.parquet` | 检测实验分析的 neg/pos 行（neg=一致样本，pos=不一致变体） |
 | `score_summary.json` | 解析状态 / 每条件覆盖率 |
 | `report.md` | 主报告（中文） |
 | `metrics.csv` | 长表指标（含 95% CI） |
@@ -125,8 +128,10 @@ uv run pinyin-eval report --run-id ablation-v1
 - [ ] `score_summary.parse_status`：`parse_error + refused + empty + api_error` 比例 < 5%，
       且没有集中在某个条件（如果 JSON 条件失败率高，优先怀疑 `response_format` 或
       `max_tokens` 截断）
-- [ ] `report.md` 的“实验×指标矩阵”覆盖设计文档第 51 行表格的每一项（✓ / —）
-- [ ] 检测指标 EP/ER/F1、FPR/FNR 与 bootstrap CI 齐全；分 voice 与总体都有
+- [ ] `report.md` 的“实验×指标矩阵”覆盖 v2 设计文档第 51 行表格的每一项（✓ / —）：
+      实验一/二只报 Tone、检测实验报 EP/ER/F1/FPR/FNR、实验三~六与 A/B 不变
+- [ ] 检测指标（来自检测实验，neg=一致样本 / pos=不一致变体）EP/ER/F1、FPR/FNR 与
+      bootstrap CI 齐全；分 voice 与总体都有；解析失败单独统计
 - [ ] 消融表每个条件 n 与预期一致（主实验已覆盖的行标注“复用主实验”）
 - [ ] McNemar 的 b/c 与效应量方向符合直觉（如噪声条件应更差）
 - [ ] 混淆矩阵与“最小对立组”设计一致（平翘舌、送气、前后鼻、n/l 应是主要混淆来源）
@@ -144,9 +149,10 @@ uv run pinyin-eval report --run-id ablation-v1
 解码:   temperature=0, top_p=1, max_tokens=256
 思考:   on = 模型默认力度; off = reasoning_effort=none
 输出:   JSON 条件 response_format=json_object; 自由文本条件无
+        schema: tone {"tone"} / free {"initial","final","tone"} / detect {"consistent"} / A/B {"choice"}
 Prompt: 版本 <PROMPT_VERSION>，全文见 tasks/*.jsonl 的 prompt_texts
 统计:   bootstrap 2000 次 (cluster=audio, stratify=voice), McNemar + Holm
-调用量: 主实验 <run_manifest.counts>; 消融 <run_manifest.counts>
+调用量: 主实验 ≈107,896; 消融 ≈96,960（以 run_manifest.counts 为准）
 脚本:   git commit <run_manifest.git_commit>; config sha256 <run_manifest.config_sha256>
 ```
 

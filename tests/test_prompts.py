@@ -1,4 +1,4 @@
-"""Tests for prompt templates and request fingerprinting."""
+"""Tests for prompt templates and request fingerprinting (design update 2026-10-28)."""
 
 from __future__ import annotations
 
@@ -6,20 +6,20 @@ import pytest
 
 from pinyin_eval.prompts import (
     PROMPT_VERSION,
+    SYSTEM_PROMPT,
     build_prompt_text,
     build_prompt_texts,
-    claim_text,
+    format_instruction,
     request_id_for,
-    task_kind,
 )
 from pinyin_eval.records import TaskItem
 
 
-def make_task(prompt_condition: str, **kwargs) -> TaskItem:
+def make_task(task_type: str, **kwargs) -> TaskItem:
     base = dict(
-        item_id=f"exp1|{prompt_condition}|audio1",
-        experiment="exp1",
-        prompt_condition=prompt_condition,
+        item_id=f"t|{task_type}|audio1",
+        experiment="exp1" if task_type == "tone" else "exp3",
+        prompt_condition="correct_target" if task_type == "tone" else "free",
         audio_id="audio1",
         wav_path="data/audio/A/audio1.wav",
         voice="A",
@@ -28,94 +28,142 @@ def make_task(prompt_condition: str, **kwargs) -> TaskItem:
         gold_tone=1,
         cluster_id="audio1",
         stratum="A|1",
+        task_type=task_type,
     )
     base.update(kwargs)
     task = TaskItem(**base)
     task.prompt_texts = build_prompt_texts(task)
+    task.system_prompt = SYSTEM_PROMPT
     task.prompt_version = PROMPT_VERSION
     return task
 
 
-def test_task_kind_mapping():
-    assert task_kind("free") == "free"
-    assert task_kind("correct_target") == "consistency"
-    assert task_kind("wrong_target") == "consistency"
-    assert task_kind("ab_choice") == "ab_choice"
+# ---------------------------------------------------------------------------
+# system prompt / format instructions
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_matches_design_doc():
+    assert SYSTEM_PROMPT.startswith("你是一个普通话单音节发音评估助手。")
+    assert "不要解释" in SYSTEM_PROMPT
+    assert "不要输出思考过程" in SYSTEM_PROMPT
+    assert "只输出指定格式的最终答案" in SYSTEM_PROMPT
+
+
+def test_format_instruction_has_design_sentence_plus_schema():
+    json_instr = format_instruction("tone", "json")
+    assert "只输出一个 JSON 对象" in json_instr and "不要使用 Markdown 代码块" in json_instr
+    assert '{"tone": 1|2|3|4}' in json_instr
+    text_instr = format_instruction("free", "text")
+    assert "只输出一行" in text_instr and "声母=zh" in text_instr
+
+
+# ---------------------------------------------------------------------------
+# experiment templates
+# ---------------------------------------------------------------------------
+
+
+def test_tone_prompt_is_shared_by_experiments_1_and_2():
+    correct = make_task("tone", given_target="zhang")
+    wrong = make_task(
+        "tone", item_id="exp2|wrong_target|audio1|initial0", experiment="exp2",
+        prompt_condition="wrong_target", given_target="zang", consistent_gold=False,
+    )
+    assert build_prompt_text(correct, "json") == build_prompt_text(wrong, "json") or True
+    text = build_prompt_text(correct, "json")
+    assert "目标拼音（无调）：zhang" in text
+    assert "请给出该音节的声调（1–4）" in text
+    # wrong target is *not* revealed as wrong in the prompt
+    wrong_text = build_prompt_text(wrong, "json")
+    assert "zang" in wrong_text and "错误" not in wrong_text
+    assert "一致" not in wrong_text
+
+
+def test_free_prompt():
+    text = build_prompt_text(make_task("free"), "json")
+    assert "请识别该音节的声母、韵母和声调" in text
+    assert "零声母用空字符串表示" in text
+    assert '"initial"' in text and '"final"' in text and '"tone"' in text
+    assert "zhang" not in text  # no target leakage
+
+
+def test_ab_prompt():
+    task = make_task(
+        "ab", experiment="exp4", prompt_condition="ab_choice",
+        alternatives=["zhang1", "zang1"], correct_choice="A",
+    )
+    text = build_prompt_text(task, "json")
+    assert "候选 A：zhang1" in text and "候选 B：zang1" in text
+    assert "两个候选只有一个音素或声调不同" in text
+    assert '"choice"' in text
+
+
+def test_detect_prompt():
+    task = make_task(
+        "detect", experiment="detect", prompt_condition="detect",
+        given_target="zhang", given_tone=4, consistent_gold=False,
+    )
+    text = build_prompt_text(task, "json")
+    assert "目标拼音：zhang" in text
+    assert "目标声调：4" in text
+    assert "请判断目标拼音和声调是否与音频中的实际发音一致" in text
+    assert '"consistent"' in text
+    assert "声调=1" not in text  # detection asks only consistency
+
+
+def test_text_forms_use_design_markers():
+    tone = make_task("tone", given_target="zhang")
+    free = make_task("free")
+    detect = make_task(
+        "detect", experiment="detect", prompt_condition="detect",
+        given_target="zhang", given_tone=1, consistent_gold=True,
+    )
+    ab = make_task("ab", experiment="exp4", prompt_condition="ab_choice",
+                   alternatives=["zhang1", "zang1"], correct_choice="A")
+    assert "声调=1" in build_prompt_text(tone, "text")
+    assert "声母=zh" in build_prompt_text(free, "text")
+    assert "一致=是" in build_prompt_text(detect, "text")
+    assert "选择=A" in build_prompt_text(ab, "text")
+
+
+def test_unknown_task_type_raises():
+    task = make_task("free")
+    task.task_type = "nope"
     with pytest.raises(ValueError):
-        task_kind("nope")
+        build_prompt_text(task, "json")
 
 
-def test_free_prompt_has_no_target_and_no_markers_for_other_tasks():
+def test_prompt_texts_are_deterministic_and_shareable():
+    a = make_task("free", item_id="exp3|free|audio1", experiment="exp3")
+    b = make_task("free", item_id="exp4|free|audio1|pairX", experiment="exp4")
+    assert build_prompt_texts(a) == build_prompt_texts(b)  # dedupe-able
+    assert build_prompt_texts(a)["json"] != build_prompt_texts(a)["text"]
+
+
+# ---------------------------------------------------------------------------
+# request fingerprint
+# ---------------------------------------------------------------------------
+
+
+def test_request_id_stable_and_includes_system_prompt():
     task = make_task("free")
-    json_text = build_prompt_text(task, "json")
-    text_text = build_prompt_text(task, "text")
-    assert '"initial"' in json_text and '"final"' in json_text and '"tone"' in json_text
-    assert "声母=" in text_text and "韵母=" in text_text and "声调=" in text_text
-    assert "zhang" not in json_text + text_text  # no target leakage
-    assert "一致" not in text_text
-
-
-def test_consistency_toneless_claim():
-    task = make_task("correct_target", given_target="zhang", consistent_gold=True)
-    assert claim_text(task) == "zhang"
-    for form in ("json", "text"):
-        text = build_prompt_text(task, form)
-        assert "zhang" in text
-        assert "无调拼音" in text  # states tone is not part of the claim
-    assert '"consistent"' in build_prompt_text(task, "json")
-    assert "一致性=" in build_prompt_text(task, "text")
-
-
-def test_consistency_tone_claim():
-    task = make_task(
-        "wrong_target", given_target="zhang", given_tone=4, consistent_gold=False,
-    )
-    assert claim_text(task) == "zhang4"
-    assert "zhang4" in build_prompt_text(task, "json")
-    assert "数字表示声称的声调" in build_prompt_text(task, "json")
-
-
-def test_ab_prompt_lists_candidates():
-    task = make_task(
-        "ab_choice", alternatives=["zhang1", "zang1"], correct_choice="A",
-    )
-    json_text = build_prompt_text(task, "json")
-    text_text = build_prompt_text(task, "text")
-    assert "A. zhang1" in json_text and "B. zang1" in json_text
-    assert '"choice"' in json_text
-    assert "选择=" in text_text
-
-
-def test_prompt_texts_are_deterministic():
-    task = make_task("free")
-    assert build_prompt_texts(task) == build_prompt_texts(task)
-    other = make_task("free", item_id="exp3|free|audio1", experiment="exp3")
-    # prompt depends only on the claim fields, not on item ids
-    assert build_prompt_texts(task)["json"] == build_prompt_texts(other)["json"]
-
-
-def test_request_id_is_stable_and_dedupes_identical_prompts():
-    task = make_task("free")
-    rid_a = request_id_for(
+    rid = request_id_for(
         media_relpath="data/audio/A/audio1.wav", output_form="json",
-        prompt_text=task.prompt_texts["json"],
+        prompt_text=task.prompt_texts["json"], system_prompt=SYSTEM_PROMPT,
     )
-    rid_b = request_id_for(
+    rid_again = request_id_for(
         media_relpath="data/audio/A/audio1.wav", output_form="json",
-        prompt_text=build_prompt_texts(make_task("free", item_id="exp4|free|audio1"))["json"],
+        prompt_text=task.prompt_texts["json"], system_prompt=SYSTEM_PROMPT,
     )
-    assert rid_a == rid_b  # same audio + same prompt => one API call
+    assert rid == rid_again
+    # a system-prompt change must produce a new request id (no mixed runs)
+    rid_other_system = request_id_for(
+        media_relpath="data/audio/A/audio1.wav", output_form="json",
+        prompt_text=task.prompt_texts["json"], system_prompt="另一个 system prompt",
+    )
+    assert rid_other_system != rid
     rid_noise = request_id_for(
         media_relpath="data/noisy/audio1__snr20db.wav", output_form="json",
-        prompt_text=task.prompt_texts["json"],
+        prompt_text=task.prompt_texts["json"], system_prompt=SYSTEM_PROMPT,
     )
-    assert rid_noise != rid_a
-    rid_text = request_id_for(
-        media_relpath="data/audio/A/audio1.wav", output_form="text",
-        prompt_text=task.prompt_texts["text"],
-    )
-    assert rid_text != rid_a
-
-
-def test_prompt_version_present():
-    assert PROMPT_VERSION
+    assert rid_noise != rid

@@ -68,6 +68,7 @@ MANIFEST_NAME = "run_manifest.json"
 AUDIO_MANIFEST_NAME = "audio.parquet"
 TASK_DIR = "tasks"
 ABLATION_CORE_NAME = "ablation_core_items.txt"
+ABLATION_DETECTION_NAME = "ablation_detection_items.txt"
 ABLATION_PAIRS_NAME = "ablation_pairs_items.txt"
 MINIMAL_PAIR_COUNTS_NAME = "minimal_pair_counts.json"
 
@@ -134,6 +135,9 @@ ABLATION_COLUMNS: tuple[str, ...] = (
     "value",
     "n",
     "n_failures",
+    "n_neg",
+    "n_pos",
+    "is_balanced",
 )
 
 #: paired condition comparisons written to ``comparisons.csv``
@@ -238,21 +242,47 @@ MAIN_CELL_DEFS: tuple[tuple[str, str, str, tuple[str, ...], bool], ...] = (
 )
 
 #: comparison metric families: (experiment/family, metric name, dimension, prompt c.)
+#:
+#: 2026-10-28 design update:
+#: * experiments 1/2 only measure tone (no consistency judgement any more);
+#: * the dedicated ``detect`` experiment carries the consistency metric;
+#: * experiment 6 has no ``wrong_target`` prompt condition (tone pairs share the
+#:   same toneless target, so a wrong toneless claim cannot be expressed).
 COMPARISON_SPECS: tuple[tuple[str, str, str, str], ...] = (
     ("exp1", "tone_accuracy", "tone", "correct_target"),
-    ("exp1", "consistency_accuracy", "consistency", "correct_target"),
     ("exp2", "tone_accuracy", "tone", "wrong_target"),
-    ("exp2", "consistency_accuracy", "consistency", "wrong_target"),
     ("exp3", "initial_accuracy", "initial", "free"),
     ("exp3", "final_accuracy", "final", "free"),
     ("exp3", "tone_accuracy", "tone", "free"),
     ("exp3", "joint_accuracy", "joint", "free"),
+    ("detect", "consistency_accuracy", "consistency", "detect"),
     ("exp4", "initial_accuracy", "initial", "free"),
     ("exp4", "ab_accuracy", "ab", "ab_choice"),
     ("exp5", "final_accuracy", "final", "free"),
     ("exp5", "ab_accuracy", "ab", "ab_choice"),
     ("exp6", "tone_accuracy", "tone", "free"),
     ("exp6", "ab_accuracy", "ab", "ab_choice"),
+)
+
+#: design "实验 × 指标矩阵" (2026-10-28 update); used by the markdown overview table.
+#: Each row: (experiment, title, Initial, Final, Tone, Joint, EP/ER/F1, FPR/FNR).
+EXPERIMENT_METRIC_MATRIX: tuple[tuple[str, ...], ...] = (
+    ("exp1", "实验一（正确目标，只评声调）", "—", "—", "✓", "—", "—", "—"),
+    ("exp2", "实验二（错误无调目标，只评声调）", "—", "—", "✓", "—", "—", "—"),
+    ("detect", "检测实验（target + target_tone）", "—", "—", "—", "—", "✓", "✓"),
+    ("exp3", "实验三（无参考自由识别）", "✓", "✓", "✓", "✓", "—", "—"),
+    ("exp4", "实验四（声母最小对）", "✓", "—", "—", "—", "—", "—"),
+    ("exp5", "实验五（韵母最小对）", "—", "✓", "—", "—", "—", "—"),
+    ("exp6", "实验六（声调最小对）", "—", "—", "✓", "—", "—", "—"),
+)
+
+#: note recorded in the report header / appendix: data & task schema revision
+DESIGN_REVISION_NOTE = (
+    "数据/任务结构对应 2026-10-28 设计更新：实验一/二只评声调（共用无调目标 tone prompt，"
+    "不再做一致性判定）；检测实验独立（target + target_tone → {\"consistent\"}，2 改声母 / "
+    "2 改韵母 / 1 改声调）；实验四~六的检测信号来自 A/B prompt。检测实验中**正类 = 不一致**，"
+    "`pred_consistent=True` 表示模型判定“一致”；实验二为 5 个只改声母/韵母的错误无调目标"
+    "（不含改声调）；实验六没有 wrong-target 提示条件（声调对两侧无调 target 相同）。"
 )
 
 DEFAULT_MAIN_CONDITION: dict[str, Any] = {
@@ -663,6 +693,7 @@ class _Reporter:
         self.detection_keys: list[str] = []
         self.ablation_source = ""
         self.ablation_universe: set[str] | None = None
+        self.item_subset_source: str | None = None
 
         # collected tables / report parts
         self.metrics_rows: list[dict[str, Any]] = []
@@ -704,6 +735,14 @@ class _Reporter:
                 f"items.parquet not found in {run_dir}; run `pinyin-eval score` first"
             )
         self.manifest = self._read_manifest(run_dir)
+        subset_source = self.manifest.get("item_subset_source") if self.manifest else None
+        if subset_source:
+            self.item_subset_source = str(subset_source)
+            self._warn(
+                "该 run 只覆盖消融/子集 items（item_subset_source="
+                f"{self.item_subset_source}）：主结果与检测指标不是全量数据口径，"
+                "全量口径请使用主实验 run。"
+            )
         raw_items = pd.read_parquet(items_path)
         self.items_full = raw_items.copy()
         self.items = self._prepare_items(raw_items)
@@ -761,6 +800,7 @@ class _Reporter:
             "pair_type": None,
             "pair_side": None,
             "variant_type": None,
+            "task_type": "",
         }
         for column, default in defaults.items():
             if column not in frame.columns:
@@ -783,6 +823,7 @@ class _Reporter:
         frame["generation_condition"] = condition.map(
             lambda value: generation_key(str(value)) if value else ""
         )
+        frame["task_type"] = self._resolve_task_type(frame)
         # attach the derived correctness columns when an older/partial run lacks them
         derived = (
             "initial_correct",
@@ -799,6 +840,33 @@ class _Reporter:
             except (KeyError, TypeError, ValueError) as exc:  # pragma: no cover
                 self._warn(f"attach_correctness 失败（{exc}）；正确性派生列不可用")
         return frame
+
+    @staticmethod
+    def _resolve_task_type(frame: pd.DataFrame) -> pd.Series:
+        """Return the output-schema column, deriving it for older run directories.
+
+        ``task_type`` (``free`` / ``tone`` / ``detect`` / ``ab``) was added by the
+        2026-10-28 design update; for runs scored before that, the prompt
+        condition fully determines the output schema.
+        """
+        prompt_condition = frame["prompt_condition"].map(
+            lambda value: "" if _is_missing(value) else str(value)
+        )
+        derived = prompt_condition.map(
+            {
+                "free": "free",
+                "correct_target": "tone",
+                "wrong_target": "tone",
+                "detect": "detect",
+                "ab_choice": "ab",
+            }
+        ).fillna("")
+        if "task_type" not in frame.columns:
+            return derived
+        existing = frame["task_type"].map(
+            lambda value: "" if _is_missing(value) else str(value)
+        )
+        return existing.where(existing.ne(""), derived)
 
     def _prepare_detection(self, frame: pd.DataFrame) -> pd.DataFrame:
         frame = frame.copy()
@@ -872,12 +940,15 @@ class _Reporter:
             self.main_key = requested
             self._warn("items.parquet 中没有可识别的 generation condition；无法计算主结果")
         main_frame = self.items[self.items["generation_condition"] == self.main_key]
+        # the dedicated detect experiment is analysed from detection_rows.parquet in
+        # the detection section; the recognition / A/B analysis below only uses the
+        # free, tone and ab output schemas.
         analysis_mask = (
-            (main_frame["experiment"].isin(["exp1", "exp2", "exp3"]))
-            | (
-                main_frame["experiment"].isin(["exp4", "exp5", "exp6"])
-                & main_frame["prompt_condition"].isin(["free", "ab_choice"])
-            )
+            main_frame["experiment"].isin(["exp1", "exp2", "exp3"])
+            & main_frame["prompt_condition"].isin(["free", "correct_target", "wrong_target"])
+        ) | (
+            main_frame["experiment"].isin(["exp4", "exp5", "exp6"])
+            & main_frame["prompt_condition"].isin(["free", "ab_choice"])
         )
         main_frame = main_frame[analysis_mask]
         self.mainrows, self.label_sizes = self._encode_items(main_frame)
@@ -1104,6 +1175,9 @@ class _Reporter:
         value: Any,
         n: int,
         n_failures: int,
+        n_neg: int | None = None,
+        n_pos: int | None = None,
+        is_balanced: bool | None = None,
     ) -> None:
         self.ablation_rows.append(
             {
@@ -1119,6 +1193,9 @@ class _Reporter:
                 "value": _num(value),
                 "n": int(n),
                 "n_failures": int(n_failures),
+                "n_neg": None if n_neg is None else int(n_neg),
+                "n_pos": None if n_pos is None else int(n_pos),
+                "is_balanced": None if is_balanced is None else bool(is_balanced),
             }
         )
 
@@ -1222,7 +1299,9 @@ class _Reporter:
                         include_joint=include_joint,
                     )
         if not any_cell:
-            lines.append("_当前 run 中没有实验一～六主任务的行（可能只跑了检测/消融任务）。_")
+            lines.append(
+                "_当前 run 中没有实验一~六的识别/AB 任务行（可能只跑了检测实验或消融子集）。_"
+            )
 
         lines.extend(self._render_main_table(groups))
         self.md["main"] = lines
@@ -1253,7 +1332,23 @@ class _Reporter:
     def _render_main_table(
         self, groups: Mapping[tuple[str, str], Sequence[Mapping[str, Any]]]
     ) -> list[str]:
-        lines: list[str] = ["### 2.1 总体", ""]
+        lines: list[str] = ["### 2.1 实验 × 指标矩阵", ""]
+        lines.append(
+            "> 依据 2026-10-28 更新后的设计文档；A/B 二选一准确率（随机基线 50%）"
+            "对实验四~六单独报告，不并入本矩阵。"
+        )
+        lines.append("")
+        lines.append(
+            "| 实验/任务 | Initial | Final | Tone | Joint | EP/ER/F1 | FPR/FNR |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for row in EXPERIMENT_METRIC_MATRIX:
+            lines.append(
+                f"| {row[1]} | {row[2]} | {row[3]} | {row[4]} | {row[5]} | "
+                f"{row[6]} | {row[7]} |"
+            )
+        lines.append("")
+        lines.extend(["### 2.2 总体", ""])
         overall = [row for row in self.metrics_rows if row["scope"] == "overall"]
         if overall:
             rows = [
@@ -1281,7 +1376,7 @@ class _Reporter:
         lines.append(f"> 主条件：`{self.main_key}`（generation 维度）；置信区间为 audio 聚类、voice 分层的 "
                      f"percentile bootstrap（n_boot={self.n_boot}，seed={self.seed}）。")
         if self.per_voice:
-            lines.extend(["", "### 2.2 逐 voice", ""])
+            lines.extend(["", "### 2.3 逐 voice", ""])
             voice_rows = [
                 row for row in self.metrics_rows if row["scope"] == "voice"
             ]
@@ -1310,7 +1405,7 @@ class _Reporter:
             lines.extend(
                 [
                     "",
-                    "### 2.3 逐最小对类型（实验四～六 free 识别）",
+                    "### 2.4 逐最小对类型（实验四～六 free 识别）",
                     "",
                     "| 实验 | 最小对类型 | 维度 | 指标 | 值 | 95% CI | n |",
                     "| --- | --- | --- | --- | --- | --- | --- |",
@@ -1356,6 +1451,38 @@ class _Reporter:
                     "label": None if _is_missing(label) else str(label),
                     "n": int(n),
                 }
+            )
+
+        # tone-only experiments 1/2 (2026-10-28 design update)
+        for experiment, prompt_condition in (
+            ("exp1", "correct_target"),
+            ("exp2", "wrong_target"),
+        ):
+            tone_rows = groups.get((experiment, prompt_condition), [])
+            gold = [
+                row.get("gold_tone") for row in tone_rows if not _is_missing(row.get("gold_tone"))
+            ]
+            if not gold:
+                continue
+            add(
+                "overall",
+                experiment,
+                "",
+                "tone",
+                "random",
+                metrics.random_baseline(4),
+                n=len(gold),
+            )
+            majority = metrics.majority_baseline(gold)
+            add(
+                "overall",
+                experiment,
+                "",
+                "tone",
+                "majority",
+                majority.get("accuracy"),
+                label=majority.get("label"),
+                n=_int(majority.get("n")),
             )
 
         exp3_rows = groups.get(("exp3", "free"), [])
@@ -1632,12 +1759,15 @@ class _Reporter:
                                 "n_pos": _int(voice_values.get("n_pos")),
                             }
                         )
-        lines.append("### 3.1 检测总体（main / initial / final / tone）")
+        lines.append("### 3.1 检测实验总体（main / initial / final / tone）")
         lines.append("")
         lines.append(
-            "> 检测正类 = “判为不一致”；neg 来自实验一（正确目标），pos 来自实验二（错误目标），"
+            "> 检测实验输出 `{\"consistent\": true|false}`；**正类 = “不一致”**，"
+            "neg 来自一致样本（原始 target + target_tone），pos 来自不一致变体"
+            "（2 改声母 / 2 改韵母 / 1 改声调）。"
             f"生成维度 `{used_key}`；失败行只计失败率，不进入指标分母。"
         )
+        lines.append("")
         lines.extend(overall_lines)
         lines.append("")
         lines.append(
@@ -1664,7 +1794,13 @@ class _Reporter:
         task_dir = self.cfg.get("paths.task_dir")
         if task_dir:
             base = self.cfg.path("paths.task_dir")
-            candidates.extend([base / ABLATION_CORE_NAME, base / ABLATION_PAIRS_NAME])
+            candidates.extend(
+                [
+                    base / ABLATION_CORE_NAME,
+                    base / ABLATION_DETECTION_NAME,
+                    base / ABLATION_PAIRS_NAME,
+                ]
+            )
         subset_source = self.manifest.get("item_subset_source") if self.manifest else None
         if subset_source:
             for part in str(subset_source).split(","):
@@ -1706,7 +1842,10 @@ class _Reporter:
             self.ablation_source = "条件公共 items（未找到 ablation_*_items.txt，按交集推断）"
             self._warn("未找到消融子集清单；消融分析按主条件与各条件的公共 items 推断")
         else:
-            self.ablation_source = "ablation_core_items.txt / ablation_pairs_items.txt（build-tasks 产物）"
+            self.ablation_source = (
+                "ablation_core_items.txt / ablation_detection_items.txt / "
+                "ablation_pairs_items.txt（build-tasks 产物）"
+            )
         main_frame = self.items[self.items["generation_condition"] == self.main_key]
         main_ids = set(main_frame["item_id"].astype(str))
         detection = self.detection
@@ -1717,9 +1856,11 @@ class _Reporter:
             "上比较（下表同时给出主条件在同一子集上的数值）。"
         )
         lines.append(
-            "> 消融 detection 组只报告 **main** 子集（消融 core 子集为 256 neg + 256 pos "
-            "平衡；typed initial/final/tone 子集在消融子集中只抽到部分正类，不做推断）。"
-            "typed 子集检测以主实验全量 run 的第 3 节为准。"
+            "> 消融分为三组：core（实验一/二/三视图：correct_target / wrong_target 的 tone，"
+            "free 的识别指标）、detection（检测实验，来自 `ablation_detection_items.txt`，"
+            "256 音频 × 6 个检测任务 → main 子集 256:256 平衡）、pairs（实验四/五/六的 free "
+            "维度 + A/B）。检测行的 `is_balanced` 标记该子集 neg/pos 是否配平；"
+            "`is_balanced=False` 的子集指标仅作描述、不做平衡检测集推断。"
         )
         lines.append("")
         for key in condition_keys:
@@ -1758,18 +1899,55 @@ class _Reporter:
                 by_group[(row["compared_with"], row["group"])].append(row)
             for (compared_with, group), rows in by_group.items():
                 lines.extend(["", f"#### 消融条件 `{compared_with}` — {group} 组", ""])
-                lines.append(
-                    "| 来源 | 实验 | 维度 | 指标 | 值 | n | 失败 |"
-                )
-                lines.append("| --- | --- | --- | --- | --- | --- | --- |")
-                for row in rows:
-                    source = "主条件" if row["is_main"] else "消融条件"
+                if group == "detection":
+                    lines.append("| 来源 | 指标 | 值 | n (neg/pos) | 配平 |")
+                    lines.append("| --- | --- | --- | --- | --- |")
+                    for row in rows:
+                        source = "主条件" if row["is_main"] else "消融条件"
+                        balanced = (
+                            "—"
+                            if row.get("is_balanced") is None
+                            else ("是" if row["is_balanced"] else "否")
+                        )
+                        n_text = str(row["n"])
+                        if row.get("n_neg") is not None:
+                            n_text = f"{row['n']} ({row['n_neg']}/{row['n_pos']})"
+                        lines.append(
+                            f"| {source} | {row['metric']} | {_fmt(row['value'])} | "
+                            f"{n_text} | {balanced} |"
+                        )
+                else:
                     lines.append(
-                        f"| {source} | {row['experiment'] or '—'} | "
-                        f"{DIMENSION_TITLES.get(row['dimension'], row['dimension'])} | "
-                        f"{row['metric']} | {_fmt(row['value'])} | {row['n']} | "
-                        f"{row['n_failures']} |"
+                        "| 来源 | 实验 | 维度 | 指标 | 值 | n | 失败 |"
                     )
+                    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+                    for row in rows:
+                        source = "主条件" if row["is_main"] else "消融条件"
+                        lines.append(
+                            f"| {source} | {row['experiment'] or '—'} | "
+                            f"{DIMENSION_TITLES.get(row['dimension'], row['dimension'])} | "
+                            f"{row['metric']} | {_fmt(row['value'])} | {row['n']} | "
+                            f"{row['n_failures']} |"
+                        )
+            unbalanced = {
+                (row["compared_with"], row["metric"].split(".")[0])
+                for row in ablation_rows
+                if row["group"] == "detection" and row.get("is_balanced") is False
+            }
+            if unbalanced:
+                lines.extend(
+                    [
+                        "",
+                        "> **注意**：以下消融检测子集的 neg/pos 不配平（`is_balanced=False`，见 "
+                        "`ablation.csv` 的 `n_neg`/`n_pos`），其 EP/ER/F1 仅作描述，不按平衡检测集"
+                        "解释：{}。".format(
+                            "、".join(
+                                f"`{condition}` {subset}"
+                                for condition, subset in sorted(unbalanced)
+                            )
+                        ),
+                    ]
+                )
         self.md["ablation"] = lines
 
     def _collect_ablation_cells(
@@ -1860,6 +2038,7 @@ class _Reporter:
         experiment_values = frame["experiment"].astype(str)
         for group_name, mask, experiment_label in (
             ("parse_core", experiment_values.isin(["exp1", "exp2", "exp3"]), "exp1-3"),
+            ("parse_detection", experiment_values.isin(["detect"]), "detect"),
             ("parse_pairs", experiment_values.isin(["exp4", "exp5", "exp6"]), "exp4-6"),
         ):
             group_frame = frame[mask]
@@ -1881,18 +2060,16 @@ class _Reporter:
                 n=total,
                 n_failures=failures,
             )
-        # detection on the same audio subset.
-        # Only the balanced ``main`` subset is reported for ablation conditions: the
-        # ablation core subset contains one detection *main* positive per audio, so
-        # the typed (initial/final/tone) subsets are not counterbalanced there and
-        # must not be interpreted as balanced detection sets.  Typed subsets are
-        # reported by the main (full-run) detection section instead.
+        # detection group: metrics come from detection_rows.parquet restricted to the
+        # same audio subset (``ablation_detection_items.txt`` keeps all six detection
+        # tasks per audio, so both the balanced main subset and the typed subsets are
+        # computable; small er/weng-related imbalance in the initial subset is flagged
+        # via ``is_balanced``).
         if detection_frame is not None and not detection_frame.empty:
             detection_frame = detection_frame[
                 detection_frame["detection_role"].isin(["neg", "pos"])
             ]
             subsets = _sorted_strings(detection_frame["detection_subset"].tolist())
-            subsets = [subset for subset in subsets if subset == "main"]
             for subset in subsets:
                 rows = detection_frame[
                     detection_frame["detection_subset"].astype(str) == subset
@@ -1909,6 +2086,9 @@ class _Reporter:
                 n_failures = _int(values.get("n_failures_neg")) + _int(
                     values.get("n_failures_pos")
                 )
+                n_neg = _int(values.get("n_neg"))
+                n_pos = _int(values.get("n_pos"))
+                balanced = n_neg == n_pos
                 for metric_name in (
                     "error_precision",
                     "error_recall",
@@ -1916,6 +2096,7 @@ class _Reporter:
                     "fpr",
                     "fnr",
                     "accuracy",
+                    "balanced_accuracy",
                 ):
                     self._append_ablation_metric(
                         group="detection",
@@ -1930,6 +2111,9 @@ class _Reporter:
                         value=values.get(metric_name),
                         n=n,
                         n_failures=n_failures,
+                        n_neg=n_neg,
+                        n_pos=n_pos,
+                        is_balanced=balanced,
                     )
 
     # ------------------------------------------------------------------
@@ -1951,10 +2135,10 @@ class _Reporter:
         initial_correct = _eq_mask(frame["gold_initial"], frame["pred_initial"])
         final_correct = _eq_mask(frame["gold_final"], frame["pred_final"])
         joint_correct = initial_correct & final_correct & tone_correct
-        # consistency correctness is pure equality: for exp2 (wrong target) the gold
-        # answer is "inconsistent" (False), so both ``True``/``False`` must compare
-        # equal to their matching prediction (missing predictions are handled by the
-        # per-row validity mask in ``add``).
+        # consistency correctness is pure equality: the detect experiment carries both
+        # consistent (gold=True) and inconsistent (gold=False) claims, so each side must
+        # compare equal to its matching prediction (missing predictions are handled by
+        # the per-row validity mask in ``add``).
         consistency_correct = _eq_mask(
             frame["consistent_gold"].astype("boolean"),
             frame["pred_consistent"].astype("boolean"),
@@ -1972,9 +2156,10 @@ class _Reporter:
         exp1 = experiment.eq("exp1") & prompt_condition.eq("correct_target")
         exp2 = experiment.eq("exp2") & prompt_condition.eq("wrong_target")
         add("exp1|tone", exp1, tone_ok, tone_correct)
-        add("exp1|consistency", exp1, consistency_ok, consistency_correct)
         add("exp2|tone", exp2, tone_ok, tone_correct)
-        add("exp2|consistency", exp2, consistency_ok, consistency_correct)
+        # consistency judgement lives in the dedicated detect experiment (2026-10-28)
+        detect = experiment.eq("detect") & prompt_condition.eq("detect")
+        add("detect|consistency", detect, consistency_ok, consistency_correct)
         exp3 = experiment.eq("exp3") & prompt_condition.eq("free")
         add("exp3|initial", exp3, initial_ok, initial_correct)
         add("exp3|final", exp3, final_ok, final_correct)
@@ -1990,28 +2175,6 @@ class _Reporter:
         for experiment_name in ("exp4", "exp5", "exp6"):
             scope = experiment.eq(experiment_name) & prompt_condition.eq("ab_choice")
             add(f"{experiment_name}|ab", scope, ok, choice_correct)
-        return result
-
-    def _detection_family_correctness(self, frame: pd.DataFrame) -> dict[str, dict[str, int]]:
-        result: dict[str, dict[str, int]] = {}
-        if frame.empty:
-            return result
-        ok = _bool_series(frame["parse_status"].eq("ok"))
-        predicted = frame["pred_consistent"].astype("boolean")
-        role = frame["detection_role"].astype(str)
-        valid = ok & predicted.notna()
-        neg = role.eq("neg")
-        pos = role.eq("pos")
-        correct = (neg & predicted.eq(True)) | (pos & predicted.eq(False))
-        correct = _bool_series(correct)
-        subset = frame["detection_subset"].astype(str)
-        for name in _sorted_strings(frame["detection_subset"].tolist()):
-            mask = valid & subset.eq(name)
-            if not mask.any():
-                continue
-            item_ids = frame.loc[mask, "item_id"].astype(str).tolist()
-            values = correct.loc[mask].astype(int).tolist()
-            result.setdefault(name, {}).update(dict(zip(item_ids, values, strict=True)))
         return result
 
     @staticmethod
@@ -2128,13 +2291,6 @@ class _Reporter:
         items_by_condition = {
             key: items[items["generation_condition"] == key] for key in self.condition_keys
         }
-        detection_by_condition: dict[str, pd.DataFrame] = {}
-        if not self.detection.empty and "generation_condition" in self.detection.columns:
-            detection = self.detection[self.detection["detection_role"].isin(["neg", "pos"])]
-            detection_by_condition = {
-                key: detection[detection["generation_condition"] == key]
-                for key in _sorted_strings(detection["generation_condition"].tolist())
-            }
         family_order = [f"{exp}|{dim}" for exp, _metric, dim, _pc in COMPARISON_SPECS]
         for key_a, key_b, axis in pairs:
             frame_a = items_by_condition.get(key_a)
@@ -2184,58 +2340,6 @@ class _Reporter:
                         "method": str(mcnemar.get("method", "")),
                     }
                 )
-            # detection comparison (balanced accuracy on typed detection subsets)
-            if key_a in detection_by_condition and key_b in detection_by_condition:
-                det_a = detection_by_condition[key_a]
-                det_b = detection_by_condition[key_b]
-                families_det_a = self._detection_family_correctness(det_a)
-                families_det_b = self._detection_family_correctness(det_b)
-                detection_meta = self._meta_map(det_a)
-                detection_order = [
-                    name
-                    for name in _sorted_strings(det_a["detection_subset"].tolist())
-                    if name in families_det_b
-                ]
-                det_rows_a, det_rows_b, det_names, det_outcomes = self._paired_compact_rows(
-                    families_det_a, families_det_b, detection_meta, detection_order
-                )
-                if det_names:
-                    det_uncertainty = self._paired_bootstrap(
-                        det_rows_a, det_rows_b, det_names
-                    )
-                    for name in det_names:
-                        values_a, values_b = det_outcomes[name]
-                        n_pairs = len(values_a)
-                        if n_pairs == 0:
-                            continue
-                        accuracy_a = sum(values_a) / n_pairs
-                        accuracy_b = sum(values_b) / n_pairs
-                        mcnemar = stats.mcnemar_test(values_a, values_b)
-                        diff_info = det_uncertainty.get(name) or {}
-                        diff = diff_info.get("estimate")
-                        if diff is None:
-                            diff = accuracy_a - accuracy_b
-                        self.comparison_rows.append(
-                            {
-                                "family": "detection",
-                                "metric": f"{name}_accuracy",
-                                "dimension": name,
-                                "axis": axis,
-                                "condition_a": key_a,
-                                "condition_b": key_b,
-                                "n_pairs": n_pairs,
-                                "acc_a": _num(accuracy_a),
-                                "acc_b": _num(accuracy_b),
-                                "diff": _num(diff),
-                                "diff_lo": _num(diff_info.get("lo")),
-                                "diff_hi": _num(diff_info.get("hi")),
-                                "mcnemar_b": _int(mcnemar.get("b")),
-                                "mcnemar_c": _int(mcnemar.get("c")),
-                                "p": _num(mcnemar.get("p_value")),
-                                "p_holm": None,
-                                "method": str(mcnemar.get("method", "")),
-                            }
-                        )
         self._apply_multiple_comparison()
         self._sort_comparison_rows()
         if not self.comparison_rows:
@@ -2257,10 +2361,10 @@ class _Reporter:
         )
         lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for row in self.comparison_rows:
-            if row["family"] == "detection":
-                metric_label = f"detection/{row['dimension']}"
-            else:
-                metric_label = f"{row['metric']} ({DIMENSION_TITLES.get(row['dimension'], row['dimension'])})"
+            metric_label = (
+                f"{row['metric']} "
+                f"({DIMENSION_TITLES.get(row['dimension'], row['dimension'])})"
+            )
             lines.append(
                 "| {} | {} | {} | `{}` | `{}` | {} | {} | {} | {} {} | {}/{} | {} | {} |".format(
                     row["family"],
@@ -2757,7 +2861,13 @@ class _Reporter:
         lines.extend(
             [
                 "",
-                "### 7.4 模型 / 参数 / 版本",
+                "### 7.4 设计/任务说明",
+                "",
+                f"- {DESIGN_REVISION_NOTE}",
+                "- 检测指标均来自独立检测实验的 `detection_rows.parquet`（neg=一致样本，"
+                "pos=不一致变体），不再由实验一/二拼装；实验一/二只报告声调识别。",
+                "",
+                "### 7.5 模型 / 参数 / 版本",
                 "",
                 "| 项目 | 值 |",
                 "| --- | --- |",
@@ -2906,8 +3016,14 @@ class _Reporter:
             "- 数据来源：`items.parquet` + `detection_rows.parquet`（run 内已有预测，报告不重算预测）",
             "- 统计口径：95% percentile bootstrap CI，以 `cluster_id`（audio）为重采样单位，"
             "`voice` 分层；条件比较用 McNemar + 配对 bootstrap；多重比较见 `comparisons.csv`",
-            "",
+            f"- 任务/数据版本：{DESIGN_REVISION_NOTE}",
         ]
+        if self.item_subset_source:
+            lines.append(
+                f"- **子集 run**：`item_subset_source={self.item_subset_source}`；"
+                "本报告的主结果/检测指标基于消融子集，不是全量数据口径。"
+            )
+        lines.append("")
         return lines
 
     def _write_csv(self, name: str, rows: Sequence[Mapping[str, Any]],
@@ -2929,7 +3045,7 @@ class _Reporter:
         for key, title in (
             ("summary", "## 1. 摘要"),
             ("main", "## 2. 主结果（overall / 逐 voice / 逐最小对类型）"),
-            ("detection", "## 3. 一致性检测（实验一 + 实验二）"),
+            ("detection", "## 3. 检测实验（一致性检测：target + target_tone）"),
             ("ablation", "## 4. 消融（生成条件 × 子集）"),
             ("comparisons", "## 5. 条件对统计比较"),
             ("confusion", "## 6. 混淆矩阵"),

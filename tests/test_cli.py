@@ -35,14 +35,15 @@ def test_check_json(cli_args):
 
 def test_cli_pipeline(cli_args, tiny_parquet_cfg):
     assert main(cli_args + ["prepare-data", "--skip-download"]) == 0
-    assert main(cli_args + ["build-tasks", "--skip-pairs"]) == 0
+    assert main(cli_args + ["build-tasks"]) == 0
     task_dir = tiny_parquet_cfg.path("paths.task_dir")
-    assert (task_dir / "core.jsonl").exists()
-    assert (task_dir / "detection_sets.csv").exists()
-    assert (task_dir / "ablation_core_items.txt").exists()
+    for name in ("core.jsonl", "detection.jsonl", "pairs.jsonl", "detection_sets.csv",
+                 "ablation_core_items.txt", "ablation_detection_items.txt",
+                 "ablation_pairs_items.txt"):
+        assert (task_dir / name).exists(), name
 
     assert main(cli_args + [
-        "generate", "--tasks", "core", "--mock", "--run-id", "cli-run",
+        "generate", "--tasks", "all", "--mock", "--run-id", "cli-run",
         "--conditions", "main",
     ]) == 0
     assert main(cli_args + ["score", "--run-id", "cli-run"]) == 0
@@ -52,6 +53,7 @@ def test_cli_pipeline(cli_args, tiny_parquet_cfg):
     summary = json.loads((run_dir / "score_summary.json").read_text())
     assert summary["n_items"] > 0
     assert summary["parse_status"].get("ok", 0) == summary["n_items"]
+    assert summary["per_experiment"].get("detect", {}).get("n", 0) > 0
 
 
 def test_estimate_and_dry_run(cli_args, tiny_parquet_cfg):
@@ -76,9 +78,9 @@ def test_generate_without_tasks_fails(cli_args, tiny_parquet_cfg):
 def test_report_after_pipeline(cli_args, tiny_parquet_cfg):
     pytest.importorskip("pinyin_eval.report")
     assert main(cli_args + ["prepare-data", "--skip-download"]) == 0
-    assert main(cli_args + ["build-tasks", "--skip-pairs"]) == 0
+    assert main(cli_args + ["build-tasks"]) == 0
     assert main(cli_args + [
-        "generate", "--tasks", "core", "--mock", "--run-id", "cli-report",
+        "generate", "--tasks", "all", "--mock", "--run-id", "cli-report",
     ]) == 0
     assert main(cli_args + ["score", "--run-id", "cli-report"]) == 0
     assert main(cli_args + ["report", "--run-id", "cli-report"]) == 0

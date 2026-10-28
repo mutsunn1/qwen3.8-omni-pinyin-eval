@@ -32,7 +32,12 @@ import pandas as pd
 from .config import Config
 from .data.minimal_pairs import build_all_pairs, build_instances, iter_pair_items
 from .normalize import MappingEntry, load_mapping
-from .prompts import PROMPT_VERSION, build_prompt_texts, request_id_for
+from .prompts import (
+    PROMPT_VERSION,
+    SYSTEM_PROMPT,
+    build_prompt_texts,
+    request_id_for,
+)
 from .records import (
     AudioRecord,
     TaskItem,
@@ -53,7 +58,7 @@ PAIR_TYPE_TO_EXPERIMENT: dict[str, str] = {
 }
 
 #: export order used in summaries
-EXPERIMENT_ORDER = ("exp1", "exp2", "exp3", "exp4", "exp5", "exp6")
+EXPERIMENT_ORDER = ("exp1", "exp2", "exp3", "detect", "exp4", "exp5", "exp6")
 
 
 class TaskError(RuntimeError):
@@ -124,7 +129,9 @@ def _sample_without_replacement(pool: Sequence[str], k: int, rng: np.random.Gene
 
 
 def _with_prompts(task: TaskItem) -> TaskItem:
+    """Attach the shared system prompt + user prompts and stable metadata."""
     task.prompt_texts = build_prompt_texts(task)
+    task.system_prompt = SYSTEM_PROMPT
     task.prompt_version = PROMPT_VERSION
     if not task.cluster_id:
         task.cluster_id = task.audio_id
@@ -133,13 +140,38 @@ def _with_prompts(task: TaskItem) -> TaskItem:
     return task
 
 
+def _base_fields(record: AudioRecord) -> dict[str, Any]:
+    return dict(
+        audio_id=record.audio_id,
+        wav_path=record.wav_path,
+        voice=record.voice,
+        gold_initial=record.initial,
+        gold_final=record.final,
+        gold_tone=record.tone,
+        cluster_id=record.audio_id,
+        stratum=f"{record.voice}|{record.tone}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Core tasks: experiments 1-3 views (tone / tone / free recognition)
+# ---------------------------------------------------------------------------
+
+
 def build_core_tasks(
     records: Sequence[AudioRecord],
     cfg: Config,
     mapping: dict[str, MappingEntry] | None = None,
 ) -> list[TaskItem]:
-    """One ``free`` + one ``correct_target`` + up to five ``wrong_target`` items
-    per audio (experiments 1-3)."""
+    """Shared task catalog for experiments 1-3.
+
+    Design update (2026-10-28):
+    * experiment 1: correct toneless target -> tone only;
+    * experiment 2: wrong toneless target -> tone only (five segmental variants:
+      2 initial changes, 2 final changes, 1 extra initial-or-final change; no
+      tone change — tone errors are covered by the detection experiment);
+    * experiment 3: free recognition (initial/final/tone).
+    """
     if mapping is None:
         mapping = load_mapping(cfg.path("paths.mapping_csv"))
     seed = cfg.seed()
@@ -147,42 +179,35 @@ def build_core_tasks(
     exp2_cfg = cfg.get("tasks.exp2", {}) or {}
     n_init = int(exp2_cfg.get("n_initial_variants", 2))
     n_final = int(exp2_cfg.get("n_final_variants", 2))
-    n_tone = int(exp2_cfg.get("n_tone_variants", 1))
+    n_extra = int(exp2_cfg.get("n_extra_segmental_variants", 1))
 
     tasks: list[TaskItem] = []
     skipped_initial = 0
     skipped_final = 0
     for record in sorted(records, key=lambda r: r.audio_id):
-        base = dict(
-            audio_id=record.audio_id,
-            wav_path=record.wav_path,
-            voice=record.voice,
-            gold_initial=record.initial,
-            gold_final=record.final,
-            gold_tone=record.tone,
-            cluster_id=record.audio_id,
-            stratum=f"{record.voice}|{record.tone}",
-        )
+        base = _base_fields(record)
 
         # experiment 3 view: free recognition
         tasks.append(_with_prompts(TaskItem(
             item_id=make_item_id("exp3", "free", record.audio_id),
             experiment="exp3",
             prompt_condition="free",
+            task_type="free",
             **base,
         )))
 
-        # experiment 1 view: correct toneless target
+        # experiment 1 view: correct toneless target -> tone only
         tasks.append(_with_prompts(TaskItem(
             item_id=make_item_id("exp1", "correct_target", record.audio_id),
             experiment="exp1",
             prompt_condition="correct_target",
+            task_type="tone",
             given_target=record.target,
             consistent_gold=True,
             **base,
         )))
 
-        # experiment 2 view: five wrong-target variants
+        # experiment 2 view: five wrong toneless segmental targets -> tone only
         rng = _rng(seed, "exp2", record.audio_id)
         init_pool = _initial_swap_pool(record.target, mapping, by_final)
         final_pool = _final_swap_pool(record.target, mapping, by_initial)
@@ -193,16 +218,30 @@ def build_core_tasks(
         if len(final_choices) < n_final:
             skipped_final += n_final - len(final_choices)
 
-        wrong_tone_pool = [t for t in (1, 2, 3, 4) if t != record.tone]
-        tone_choices = _sample_without_replacement(
-            [str(t) for t in wrong_tone_pool], n_tone, rng
-        )
+        # 5th (extra) variant: one more initial or final change, chosen by hash so
+        # every variant still changes only one segmental part (design: 只改声母或韵母)
+        extra_choices: list[tuple[str, str]] = []
+        if n_extra > 0:
+            used_init = set(init_choices)
+            used_final = set(final_choices)
+            remaining_init = [t for t in init_pool if t not in used_init]
+            remaining_final = [t for t in final_pool if t not in used_final]
+            prefer_initial = _balanced_choice(seed, f"exp2-extra:{record.audio_id}") == 0
+            order = [("initial", remaining_init), ("final", remaining_final)]
+            if not prefer_initial:
+                order.reverse()
+            for variant_type, pool in order:
+                if pool:
+                    picked = _sample_without_replacement(pool, n_extra, rng)
+                    extra_choices = [(variant_type, t) for t in picked]
+                    break
 
         for idx, swapped_target in enumerate(init_choices):
             tasks.append(_with_prompts(TaskItem(
                 item_id=make_item_id("exp2", "wrong_target", f"{record.audio_id}|initial{idx}"),
                 experiment="exp2",
                 prompt_condition="wrong_target",
+                task_type="tone",
                 given_target=swapped_target,
                 consistent_gold=False,
                 variant_type="initial",
@@ -214,7 +253,105 @@ def build_core_tasks(
                 item_id=make_item_id("exp2", "wrong_target", f"{record.audio_id}|final{idx}"),
                 experiment="exp2",
                 prompt_condition="wrong_target",
+                task_type="tone",
                 given_target=swapped_final,
+                consistent_gold=False,
+                variant_type="final",
+                variant_index=idx,
+                **base,
+            )))
+        for idx, (variant_type, swapped_target) in enumerate(extra_choices):
+            tasks.append(_with_prompts(TaskItem(
+                item_id=make_item_id("exp2", "wrong_target", f"{record.audio_id}|extra{idx}"),
+                experiment="exp2",
+                prompt_condition="wrong_target",
+                task_type="tone",
+                given_target=swapped_target,
+                consistent_gold=False,
+                variant_type=variant_type,
+                variant_index=idx + 2,
+                **base,
+            )))
+
+    log.info(
+        "core tasks: %d items; exp2 variant shortfall: initial=%d final=%d extra=%d",
+        len(tasks), skipped_initial, skipped_final,
+        sum(1 for t in tasks if t.experiment == "exp2" and t.variant_type == "extra"),
+    )
+    return tasks
+
+
+# ---------------------------------------------------------------------------
+# Detection experiment (new in the 2026-10-28 design update)
+# ---------------------------------------------------------------------------
+
+
+def build_detection_tasks(
+    records: Sequence[AudioRecord],
+    cfg: Config,
+    mapping: dict[str, MappingEntry] | None = None,
+) -> list[TaskItem]:
+    """Detection experiment: target + target_tone -> consistency only.
+
+    Per audio: 1 consistent sample (original ``target`` + ``label`` tone) and 5
+    inconsistent variants: 2 initial changes, 2 final changes, 1 tone change.
+    Negative/positive sets for the metrics are built by
+    :func:`build_detection_sets`.
+    """
+    if mapping is None:
+        mapping = load_mapping(cfg.path("paths.mapping_csv"))
+    seed = cfg.seed()
+    by_final, by_initial = _build_pools(mapping)
+    det_cfg = cfg.get("tasks.detection", {}) or {}
+    n_init = int(det_cfg.get("n_initial_variants", 2))
+    n_final = int(det_cfg.get("n_final_variants", 2))
+    n_tone = int(det_cfg.get("n_tone_variants", 1))
+
+    tasks: list[TaskItem] = []
+    for record in sorted(records, key=lambda r: r.audio_id):
+        base = _base_fields(record)
+
+        # consistent negative sample: original target + true tone
+        tasks.append(_with_prompts(TaskItem(
+            item_id=make_item_id("detect", "detect", record.audio_id),
+            experiment="detect",
+            prompt_condition="detect",
+            task_type="detect",
+            given_target=record.target,
+            given_tone=record.tone,
+            consistent_gold=True,
+            **base,
+        )))
+
+        rng = _rng(seed, "detect", record.audio_id)
+        init_pool = _initial_swap_pool(record.target, mapping, by_final)
+        final_pool = _final_swap_pool(record.target, mapping, by_initial)
+        init_choices = _sample_without_replacement(init_pool, n_init, rng)
+        final_choices = _sample_without_replacement(final_pool, n_final, rng)
+        wrong_tone_pool = [t for t in (1, 2, 3, 4) if t != record.tone]
+        tone_choices = _sample_without_replacement([str(t) for t in wrong_tone_pool], n_tone, rng)
+
+        for idx, swapped_target in enumerate(init_choices):
+            tasks.append(_with_prompts(TaskItem(
+                item_id=make_item_id("detect", "detect", f"{record.audio_id}|initial{idx}"),
+                experiment="detect",
+                prompt_condition="detect",
+                task_type="detect",
+                given_target=swapped_target,
+                given_tone=record.tone,  # only segments are wrong
+                consistent_gold=False,
+                variant_type="initial",
+                variant_index=idx,
+                **base,
+            )))
+        for idx, swapped_final in enumerate(final_choices):
+            tasks.append(_with_prompts(TaskItem(
+                item_id=make_item_id("detect", "detect", f"{record.audio_id}|final{idx}"),
+                experiment="detect",
+                prompt_condition="detect",
+                task_type="detect",
+                given_target=swapped_final,
+                given_tone=record.tone,
                 consistent_gold=False,
                 variant_type="final",
                 variant_index=idx,
@@ -222,9 +359,10 @@ def build_core_tasks(
             )))
         for idx, wrong_tone in enumerate(tone_choices):
             tasks.append(_with_prompts(TaskItem(
-                item_id=make_item_id("exp2", "wrong_target", f"{record.audio_id}|tone{idx}"),
-                experiment="exp2",
-                prompt_condition="wrong_target",
+                item_id=make_item_id("detect", "detect", f"{record.audio_id}|tone{idx}"),
+                experiment="detect",
+                prompt_condition="detect",
+                task_type="detect",
                 given_target=record.target,
                 given_tone=int(wrong_tone),
                 consistent_gold=False,
@@ -232,11 +370,7 @@ def build_core_tasks(
                 variant_index=idx,
                 **base,
             )))
-
-    log.info(
-        "core tasks: %d items; exp2 variant shortfall: initial=%d final=%d",
-        len(tasks), skipped_initial, skipped_final,
-    )
+    log.info("detection tasks: %d items", len(tasks))
     return tasks
 
 
@@ -259,6 +393,7 @@ def build_pair_tasks(
     log.info("minimal pairs: %d pairs -> %d instances", len(pairs), len(instances))
 
     tasks: list[TaskItem] = []
+    skipped_exp6_wrong = 0
     for item in iter_pair_items(instances):
         experiment = PAIR_TYPE_TO_EXPERIMENT.get(item.pair_type)
         if experiment is None:
@@ -278,47 +413,47 @@ def build_pair_tasks(
             pair_side=item.side,
             stratum=f"{audio.voice}|{audio.tone}",
         )
-
-        # item ids include the pair id: one audio can belong to several tone pairs
         pair_suffix = f"{audio.audio_id}|{item.pair_id}"
 
-        # free recognition
+        # free recognition (same prompt as experiment 3 -> request-level dedupe)
         tasks.append(_with_prompts(TaskItem(
             item_id=make_item_id(experiment, "free", pair_suffix),
             experiment=experiment,
             prompt_condition="free",
+            task_type="free",
             **base,
         )))
 
-        # correct target
+        # correct target: tone-only prompt with the audio's own toneless target
         tasks.append(_with_prompts(TaskItem(
             item_id=make_item_id(experiment, "correct_target", pair_suffix),
             experiment=experiment,
             prompt_condition="correct_target",
+            task_type="tone",
             given_target=audio.target,
             consistent_gold=True,
             **base,
         )))
 
-        # wrong target
-        if experiment == "exp6":
-            given_target = audio.target
-            given_tone = other.tone
-            variant_type = "tone"
+        # wrong target: tone-only prompt with the minimal-pair partner's target.
+        # For experiment 6 the partner has the same toneless target (tone pairs
+        # differ only in tone), so a "wrong target" is not expressible in the
+        # toneless-target prompt; those items are skipped (documented in
+        # docs/decisions.md) and tone discrimination is measured via A/B.
+        if audio.target == other.target:
+            skipped_exp6_wrong += 1
         else:
-            given_target = other.target
-            given_tone = None
-            variant_type = "initial" if experiment == "exp4" else "final"
-        tasks.append(_with_prompts(TaskItem(
-            item_id=make_item_id(experiment, "wrong_target", pair_suffix),
-            experiment=experiment,
-            prompt_condition="wrong_target",
-            given_target=given_target,
-            given_tone=given_tone,
-            consistent_gold=False,
-            variant_type=variant_type,
-            **base,
-        )))
+            tasks.append(_with_prompts(TaskItem(
+                item_id=make_item_id(experiment, "wrong_target", pair_suffix),
+                experiment=experiment,
+                prompt_condition="wrong_target",
+                task_type="tone",
+                given_target=other.target,
+                given_tone=None,
+                consistent_gold=False,
+                variant_type="initial" if experiment == "exp4" else "final",
+                **base,
+            )))
 
         # A/B discrimination (balanced candidate order)
         own_surface = _tone_digit_string(audio.target, audio.tone)
@@ -334,12 +469,13 @@ def build_pair_tasks(
             item_id=make_item_id(experiment, "ab_choice", pair_suffix),
             experiment=experiment,
             prompt_condition="ab_choice",
+            task_type="ab",
             alternatives=alternatives,
             correct_choice=correct_choice,
             **base,
         )))
 
-    log.info("pair tasks: %d items", len(tasks))
+    log.info("pair tasks: %d items (skipped exp6 wrong-target: %d)", len(tasks), skipped_exp6_wrong)
     return tasks
 
 
@@ -348,15 +484,16 @@ def build_pair_tasks(
 # ---------------------------------------------------------------------------
 
 
-def build_detection_sets(core_tasks: Sequence[TaskItem], cfg: Config) -> pd.DataFrame:
-    """Pair exp1 negatives with exp2 positives per audio/cluster.
+def build_detection_sets(detection_tasks: Sequence[TaskItem], cfg: Config) -> pd.DataFrame:
+    """Pair consistent (negative) with inconsistent (positive) detection claims.
 
     Returns a long dataframe with one row per (subset, audio):
-    ``subset`` in {main, initial, final, tone}; ``negative_item_id`` from exp1 and
-    ``positive_item_id`` from exp2.  ``main`` samples one of the five variants per
-    audio with weights 2/2/1 (initial/final/tone); each per-type subset samples one
-    variant of that type.  Small syllable inventories (``er``/``weng`` have no
-    same-final alternative) make the ``initial`` subset slightly smaller.
+    ``subset`` in {main, initial, final, tone}; ``negative_item_id`` is the
+    consistent sample (original target+tone) and ``positive_item_id`` is an
+    inconsistent variant.  ``main`` samples one of the five variants per audio
+    with weights 2/2/1 (initial/final/tone); each per-type subset samples one
+    variant of that type.  ``er``/``weng`` have no same-final alternative, so the
+    ``initial`` subset is slightly smaller.
     """
     seed = cfg.seed()
     weights = cfg.get("tasks.detection.strata_weights", {"initial": 2, "final": 2, "tone": 1})
@@ -364,23 +501,21 @@ def build_detection_sets(core_tasks: Sequence[TaskItem], cfg: Config) -> pd.Data
 
     negatives: dict[str, TaskItem] = {}
     positives: dict[str, dict[str, list[TaskItem]]] = defaultdict(lambda: defaultdict(list))
-    for task in core_tasks:
-        if task.experiment == "exp1" and task.prompt_condition == "correct_target":
+    for task in detection_tasks:
+        if task.experiment != "detect":
+            continue
+        if task.consistent_gold is True:
             negatives[task.audio_id] = task
-        elif task.experiment == "exp2" and task.prompt_condition == "wrong_target":
-            assert task.variant_type is not None
+        elif task.variant_type:
             positives[task.audio_id][task.variant_type].append(task)
 
     rows: list[dict[str, Any]] = []
-    missing_negative = 0
     for audio_id in sorted(negatives):
         neg = negatives[audio_id]
-        by_type = positives.get(audio_id, {})
-        available = {k: v for k, v in by_type.items() if v}
+        available = {k: v for k, v in positives.get(audio_id, {}).items() if v}
         if not available:
-            log.warning("no exp2 positives for audio %s", audio_id)
+            log.warning("no inconsistent detection variants for audio %s", audio_id)
             continue
-
         for subset in subsets:
             if subset == "main":
                 types = sorted(available)
@@ -411,12 +546,11 @@ def build_detection_sets(core_tasks: Sequence[TaskItem], cfg: Config) -> pd.Data
                 "positive_item_id": pos.item_id,
                 "variant_type": pos.variant_type,
                 "negative_given_target": neg.given_target,
+                "negative_given_tone": neg.given_tone,
                 "positive_given_target": pos.given_target,
                 "positive_given_tone": pos.given_tone,
             })
 
-    if missing_negative:
-        log.warning("%d audios had no exp1 negative item", missing_negative)
     df = pd.DataFrame(rows)
     log.info("detection rows: %s", df.groupby("subset").size().to_dict() if len(df) else {})
     return df
@@ -431,27 +565,18 @@ def sample_ablation(
     cfg: Config,
     core_tasks: Sequence[TaskItem],
     pair_tasks: Sequence[TaskItem],
+    detection_tasks: Sequence[TaskItem],
     detection_sets: pd.DataFrame | None = None,
-) -> dict[str, list[str]]:
+) -> dict[str, Any]:
     """Return the fixed item-id subsets used by the ablation grid.
 
-    Design: "消融每个条件 256 条，按 4 voice x 4 tone x 16 分层" — a *condition*
-    is (prompt condition x thinking x audio quality x output form).  The core
-    subset therefore fixes 256 audios (16 per voice|tone cell) and keeps, for each
-    audio, exactly:
-
-    * the ``free`` task (experiment 3 view) -> 256 items,
-    * the ``correct_target`` task (experiment 1 view) -> 256 items,
-    * the detection-selected ``wrong_target`` positive (experiment 2 view)
-      -> 256 items, which also makes 256 complete detection pairs available.
-
-    Hence 768 items total and exactly 256 items per prompt condition; the same
-    items are replayed for every generation condition so the comparisons are
-    paired.
-
-    Minimal pairs: sample up to ``cap`` pair instances per ``pair_type`` (both
-    sides, all prompt conditions of those instances); categories smaller than the
-    cap contribute all their instances (i/ü 80, ian/üan 48).
+    * core (experiments 1-3): 256 items per prompt condition, stratified by
+      voice|tone (16 per cell) -> 3 x 256 = 768 items.
+    * detection: 256 audios stratified by voice|tone, keeping **all six**
+      detection tasks per audio (1 consistent + 5 inconsistent) so that both the
+      balanced ``main`` set and the typed subsets stay computable -> 1536 items.
+    * pairs (experiments 4-6): up to ``cap`` pair instances per ``pair_type``,
+      keeping both sides and all prompt conditions of those instances.
     """
     seed = cfg.seed()
     per_condition = int(cfg.get("tasks.ablation.items_per_condition", 256))
@@ -459,53 +584,58 @@ def sample_ablation(
     pair_cap = int(cfg.get("tasks.minimal_pairs.ablation_per_type_cap", 256))
     tone_cap = int(cfg.get("tasks.minimal_pairs.tone_ablation_pairs", 256))
 
-    # --- core: 256 audios stratified by voice|tone ---
-    by_stratum: dict[str, dict[str, TaskItem]] = defaultdict(dict)
-    for task in core_tasks:
-        if task.prompt_condition == "free":
-            by_stratum[task.stratum][task.audio_id] = task
-    selected_audios: set[str] = set()
-    for stratum in sorted(by_stratum):
-        audio_ids = sorted(by_stratum[stratum])
-        rng = _rng(seed, "ablation-core", stratum)
-        k = min(strata_per_cell, len(audio_ids))
-        idx = rng.choice(len(audio_ids), size=k, replace=False)
-        selected_audios.update(audio_ids[int(i)] for i in sorted(idx))
-    if len(selected_audios) != per_condition:
-        log.warning(
-            "ablation core selected %d audios (target %d)", len(selected_audios), per_condition
-        )
-
-    indexed: dict[tuple[str, str], TaskItem] = {}
-    for task in core_tasks:
-        indexed.setdefault((task.audio_id, task.prompt_condition), task)
-
-    # detection positives for the 'main' detection subset (one wrong-target item
-    # per audio), so ablation detection stays balanced
-    pos_by_audio: dict[str, str] = {}
-    if detection_sets is None:
-        detection_sets = build_detection_sets(core_tasks, cfg)
-    main_rows = detection_sets[detection_sets["subset"] == "main"]
-    for row in main_rows.to_dict("records"):
-        pos_by_audio[str(row["audio_id"])] = str(row["positive_item_id"])
-
+    # --- core (experiments 1-3 views): 256 items per prompt condition ---
     core_selected: list[str] = []
-    for audio_id in sorted(selected_audios):
-        for prompt_condition in ("free", "correct_target"):
-            task = indexed.get((audio_id, prompt_condition))
-            if task is not None:
-                core_selected.append(task.item_id)
-        positive_id = pos_by_audio.get(audio_id)
-        if positive_id is not None:
-            core_selected.append(positive_id)
+    by_prompt: dict[str, list[TaskItem]] = defaultdict(list)
+    for task in core_tasks:
+        by_prompt[task.prompt_condition].append(task)
+    for prompt_condition in sorted(by_prompt):
+        tasks_for_prompt = by_prompt[prompt_condition]
+        by_stratum: dict[str, list[TaskItem]] = defaultdict(list)
+        for task in tasks_for_prompt:
+            by_stratum[task.stratum].append(task)
+        chosen: list[str] = []
+        for stratum in sorted(by_stratum):
+            pool = sorted(by_stratum[stratum], key=lambda t: t.item_id)
+            rng = _rng(seed, "ablation-core", prompt_condition, stratum)
+            k = min(strata_per_cell, len(pool))
+            idx = rng.choice(len(pool), size=k, replace=False)
+            chosen.extend(pool[int(i)].item_id for i in sorted(idx))
+        if chosen and len(chosen) != per_condition:
+            log.warning(
+                "ablation core[%s] selected %d items (target %d)",
+                prompt_condition, len(chosen), per_condition,
+            )
+        core_selected.extend(chosen)
+
+    # --- detection: 256 audios x all six detection tasks ---
+    detection_selected: list[str] = []
+    if detection_tasks:
+        by_stratum_det: dict[str, list[str]] = defaultdict(list)
+        for task in detection_tasks:
+            if task.consistent_gold is True:
+                by_stratum_det[task.stratum].append(task.audio_id)
+        selected_audios: set[str] = set()
+        for stratum in sorted(by_stratum_det):
+            audio_ids = sorted(set(by_stratum_det[stratum]))
+            rng = _rng(seed, "ablation-detection", stratum)
+            k = min(strata_per_cell, len(audio_ids))
+            idx = rng.choice(len(audio_ids), size=k, replace=False)
+            selected_audios.update(audio_ids[int(i)] for i in sorted(idx))
+        detection_selected = [
+            t.item_id for t in detection_tasks if t.audio_id in selected_audios
+        ]
+        if len(selected_audios) != per_condition:
+            log.warning(
+                "ablation detection selected %d audios (target %d)",
+                len(selected_audios), per_condition,
+            )
 
     # --- minimal pairs: cap pair instances per pair_type ---
     by_type_instances: dict[str, dict[str, str]] = defaultdict(dict)
-    pair_ids_by_type_items: dict[str, list[TaskItem]] = defaultdict(list)
     for task in pair_tasks:
         assert task.pair_id and task.pair_type
         by_type_instances[task.pair_type][task.pair_id] = task.voice
-        pair_ids_by_type_items[task.pair_type].append(task)
 
     selected_pair_ids: set[str] = set()
     selected_summary: dict[str, dict[str, int]] = {}
@@ -520,13 +650,16 @@ def sample_ablation(
         selected_summary[pair_type] = {"available": len(instance_ids), "selected": len(chosen)}
 
     pair_ids = [t.item_id for t in pair_tasks if t.pair_id in selected_pair_ids]
-    log.info("ablation selection: core=%d items, pairs=%d items",
-             len(core_selected), len(pair_ids))
+    log.info(
+        "ablation selection: core=%d, detection=%d, pairs=%d items",
+        len(core_selected), len(detection_selected), len(pair_ids),
+    )
     log.info("ablation pair instances: %s", selected_summary)
     return {
         "core": core_selected,
+        "detect": detection_selected,
         "pairs": pair_ids,
-        "pair_instance_summary": selected_summary,  # type: ignore[dict-item]
+        "pair_instance_summary": selected_summary,
     }
 
 
@@ -566,6 +699,7 @@ def request_id_for_task(cfg: Config, task: TaskItem, *, output_form: str,
         media_relpath=media_rel_for(cfg, task, audio_quality),
         output_form=output_form,
         prompt_text=task.prompt_texts[output_form],
+        system_prompt=task.system_prompt or SYSTEM_PROMPT,
     )
 
 

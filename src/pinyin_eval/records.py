@@ -21,21 +21,26 @@ from typing import Any, ClassVar
 # Enumerations (plain tuples to keep JSON / parquet friendly)
 # ---------------------------------------------------------------------------
 
-EXPERIMENTS: tuple[str, ...] = ("exp1", "exp2", "exp3", "exp4", "exp5", "exp6")
+EXPERIMENTS: tuple[str, ...] = ("exp1", "exp2", "exp3", "detect", "exp4", "exp5", "exp6")
 EXPERIMENT_TITLES: dict[str, str] = {
-    "exp1": "exp1_correct_target",
-    "exp2": "exp2_wrong_target",
+    "exp1": "exp1_correct_target_tone",
+    "exp2": "exp2_wrong_target_tone",
     "exp3": "exp3_free_recognition",
+    "detect": "detect_consistency",
     "exp4": "exp4_initial_minimal_pairs",
     "exp5": "exp5_final_minimal_pairs",
     "exp6": "exp6_tone_minimal_pairs",
 }
 
-PROMPT_CONDITIONS: tuple[str, ...] = ("free", "correct_target", "wrong_target", "ab_choice")
+#: task types (output schema) sent to the model
+TASK_TYPES: tuple[str, ...] = ("free", "tone", "detect", "ab")
+
+PROMPT_CONDITIONS: tuple[str, ...] = ("free", "correct_target", "wrong_target", "detect", "ab_choice")
 PROMPT_CONDITION_TITLES: dict[str, str] = {
     "free": "自由识别",
     "correct_target": "目标条件（正确目标）",
     "wrong_target": "目标条件（错误目标）",
+    "detect": "检测一致性",
     "ab_choice": "A/B 辨别",
 }
 
@@ -44,6 +49,7 @@ EXPERIMENT_PROMPT_CONDITIONS: dict[str, tuple[str, ...]] = {
     "exp1": ("free", "correct_target", "wrong_target"),
     "exp2": ("free", "correct_target", "wrong_target"),
     "exp3": ("free", "correct_target", "wrong_target"),
+    "detect": ("detect",),
     "exp4": ("free", "correct_target", "wrong_target", "ab_choice"),
     "exp5": ("free", "correct_target", "wrong_target", "ab_choice"),
     "exp6": ("free", "correct_target", "wrong_target", "ab_choice"),
@@ -69,6 +75,7 @@ EXPERIMENT_METRIC_DIMENSION: dict[str, str] = {
     "exp1": "tone",
     "exp2": "tone",
     "exp3": "joint",
+    "detect": "detection",
     "exp4": "initial",
     "exp5": "final",
     "exp6": "tone",
@@ -157,7 +164,9 @@ class TaskItem:
     alternatives: list[str] | None = None    # ab_choice only, order ["A","B"]
     correct_choice: str | None = None        # ab_choice only: "A" | "B"
     stratum: str = ""                        # voice|tone, for stratified sampling
+    task_type: str = ""                      # free | tone | detect | ab (output schema)
     prompt_texts: dict[str, str] | None = None   # {"json":..., "text":...} built by tasks.py
+    system_prompt: str = ""                  # shared system prompt (part of request id)
     prompt_version: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -263,10 +272,12 @@ class ItemResult:
     raw_reasoning: str = ""
     latency_s: float = 0.0
     error: str | None = None
-    # filled when assembling a detection analysis (negatives come from exp1,
-    # positives from exp2); None otherwise.
+    # filled when assembling a detection analysis (negatives = consistent claims,
+    # positives = inconsistent claims of the detection experiment); None otherwise.
     detection_role: str | None = None
     detection_subset: str | None = None
+    # output schema of the task: free | tone | detect | ab
+    task_type: str = ""
 
     PARSE_STATUSES: ClassVar[tuple[str, ...]] = PARSE_STATUSES
 
@@ -311,6 +322,7 @@ def make_pair_id(pair_type: str, target_a: str, target_b: str, voice: str, tone:
 __all__ = [
     "AUDIO_QUALITIES",
     "EXPERIMENTS",
+    "TASK_TYPES",
     "EXPERIMENT_METRIC_DIMENSION",
     "EXPERIMENT_PROMPT_CONDITIONS",
     "EXPERIMENT_TITLES",

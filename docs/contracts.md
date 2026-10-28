@@ -82,28 +82,40 @@ docs/                 # 设计快照、契约、运行协议
 
 ### 3.1 任务目录与去重（重要）
 
-实验一/二/三是**同一批任务的分析视图**，不是三套独立生成：
+> 2026-10-28 设计更新：实验一/二只评声调（不再做一致性判定）；新增独立**检测实验**
+> （target + target_tone → 只输出 `{"consistent"}`）。详见 `docs/experiment-design.md`。
 
-* `tasks/core.jsonl` —— 覆盖全部 6160 条音频：
-  * `prompt_condition="free"` → 实验三视图
-  * `prompt_condition="correct_target"` → 实验一视图
-  * `prompt_condition="wrong_target"` × 5 变体/音频 → 实验二视图
-* `tasks/pairs.jsonl` —— 最小对音频 × 4 个提示条件（实验四/五/六视图）。
+三个任务目录：
 
-A/B 只用于最小对实验。**跨实验视图、甚至跨条件的重复请求只发一次**：
-`TaskItem` 有两个输出形式的最终提示文本 `prompt_texts={"json":..., "text":...}`；
-生成请求去重键
-`request_id = sha256(f"{media_path}\0{output_form}\0{prompt_texts[output_form]}")[:16]`，
+* `tasks/core.jsonl` —— 实验一/二/三视图，覆盖全部 6160 条音频：
+  * `prompt_condition="free"` → 实验三视图（task_type=free）
+  * `prompt_condition="correct_target"` → 实验一视图（task_type=tone，给正确无调 target）
+  * `prompt_condition="wrong_target"` × 5 变体/音频 → 实验二视图（task_type=tone，
+    5 个“只改声母/韵母”的错误无调 target：2 改声母 + 2 改韵母 + 1 额外段错误）
+* `tasks/detection.jsonl` —— 检测实验：每音频 1 个一致样本（原始 target+label 声调）
+  + 5 个不一致变体（2 改声母 / 2 改韵母 / 1 改声调），task_type=detect。
+* `tasks/pairs.jsonl` —— 最小对音频（实验四/五/六视图）：
+  * free（task_type=free）、correct_target（tone，给本侧无调 target）、
+    ab_choice（task_type=ab）
+  * wrong_target（tone，给对侧无调 target）仅 exp4/exp5；exp6 声调对两侧无调 target
+    相同，无法表达“错误目标”，跳过（见 decisions）。
+
+**跨实验视图、跨条件的重复请求只发一次**：
+`TaskItem.task_type` 决定输出 schema；`TaskItem.prompt_texts={"json":..., "text":...}`，
+`TaskItem.system_prompt` 为共用 system prompt。生成请求去重键
+`request_id = sha256(f"{media_path}\0{output_form}\0{system_prompt}\0{prompt_texts[output_form]}")[:16]`，
 其中 `media_path` 由 audio_quality 决定（clean→`wav_path`，noise_20db→缓存噪声路径）。
-runner 对 request_id 去重后调用 API；scoring 用 `prompt_texts` 重算 request_id 把预测关联回
-每个 item（同一 request 可对应多个 item，例如实验三 free 与实验四 free 共用一次调用）。
+runner 对 request_id 去重后调用 API；scoring 用 prompt_texts/system_prompt 重算 request_id
+把预测关联回每个 item（同一 request 可对应多个 item，例如实验三 free 与实验四 free 共用一次调用）。
 
 ### 3.2 item_id 命名（确定性）
 
 ```
 exp1|correct_target|{audio_id}
-exp2|wrong_target|{audio_id}|{variant_type}{variant_index}   # variant_type∈{initial,final,tone}
+exp2|wrong_target|{audio_id}|{variant_type}{variant_index}   # variant_type∈{initial,final}（+extra）
 exp3|free|{audio_id}
+detect|detect|{audio_id}                                     # 一致样本（负类）
+detect|detect|{audio_id}|{variant_type}{variant_index}       # 不一致变体（正类）
 exp4|free|{audio_id}
 exp4|correct_target|{audio_id}
 exp4|wrong_target|{audio_id}                # 给对侧最小对目标（无调）
@@ -124,28 +136,30 @@ exp6|ab_choice|{audio_id}|{pair_id}（候选同声母同韵母、不同声调）
 ### 3.3 金标与 given_target 规则
 
 * `gold_initial/gold_final/gold_tone` 永远描述**音频**。
-* `correct_target`：`given_target` = 规范无调拼音（如 `zhang`），`given_tone = None`，
-  `consistent_gold = True`。
-* `wrong_target` 段错误变体（声母/韵母）：`given_target` = 改动后的无调拼音（如 `zang`），
-  `given_tone = None`，`consistent_gold = False`，`variant_type = initial|final`。
-* `wrong_target` 声调错误变体：`given_target` = 正确无调拼音，`given_tone` = 错误声调（1–4 且 ≠ gold），
-  `consistent_gold = False`，`variant_type = "tone"`。
-* 最小对实验的 `wrong_target`：exp4/5 给对侧音频的规范无调拼音（`given_tone=None`）；
-  exp6 给本音频无调拼音 + 对侧声调（`given_tone=对侧 tone ≠ gold`）。
-* `free`：`given_target = None`（但 free 任务的 `prompt_texts` 不含目标文本）。
-* `ab_choice`：`alternatives=[candA, candB]`，元素为**带声调数字的拼音**（如 `zhang1`），
-  `correct_choice = "A"|"B"`，A/B 位置按 hash(item_id 基名) 平衡（两侧各半）。
+* `task_type` 决定输出 schema：`free`（initial/final/tone）、`tone`（只有 tone）、
+  `detect`（只有 consistent）、`ab`（只有 choice）。
+* `correct_target`（实验一/四/五/六）：`given_target` = 本音频规范无调拼音，`given_tone=None`，
+  `consistent_gold=True`。
+* `wrong_target` 段错误变体（实验二/四/五）：`given_target` = 改动后的无调拼音，
+  `given_tone=None`，`consistent_gold=False`，`variant_type=initial|final`。
+* 检测实验：`given_target` + `given_tone` 均给出；一致样本 = 原始 target+label；
+  段错误变体 = 改动 target、`given_tone=真实声调`；声调错误变体 = 原始 target、`given_tone≠gold`。
+* `free`：`given_target=None`。
+* `ab_choice`：`alternatives=[candA, candB]` 为带声调数字拼音，`correct_choice="A"|"B"`，
+  A/B 位置按 hash 平衡。
 * `cluster_id` = `audio_id`；检测分析以 audio 聚类。
-* `stratum` = `voice|tone`（用于消融抽样：4 voice × 4 tone × 每层 16 条）。
+* `stratum` = `voice|tone`（消融抽样：4 voice × 4 tone × 每层 16 条）。
 
 ### 3.4 实验一~三主任务
 
-* exp1：6160 条音频 × `correct_target`（主实验）。
-* exp2：6160 条音频 × `wrong_target`，每条 5 个变体：2 个声母改动（variant_index 0/1）、
-  2 个韵母改动（0/1）、1 个声调改动（0）。改动后的目标必须存在于 378 个 canonical target 中；
-  同 final 换 initial 池 / 同 initial 换 final 池中确定性抽取（配置 seed），排除无效组合
-  （零声母、`-i` 组平翘舌等同 final 无效对）；声调改动取 ≠ gold 的随机声调。
-* exp3：6160 条音频 × `free`（主实验）。
+* exp1：6160 条音频 × `correct_target`，task_type=tone（只评声调）。
+* exp2：6160 条音频 × `wrong_target`，每条 5 个“只改声母或韵母”的错误无调 target
+  （2 initial + 2 final + 1 extra；`er/weng` 无同韵母其它声母，只有 3 个变体）。
+  改动后的目标必须存在于 378 个 canonical target 中；同 final 换 initial 池 /
+  同 initial 换 final 池中确定性抽取（配置 seed）。
+* exp3：6160 条音频 × `free`，task_type=free。
+* 检测实验：6160 条音频，每条 1 一致 + 5 不一致（2/2/1），task_type=detect；
+  其 condition 网格只有 8 个生成条件（thinking/quality/form），提示条件固定为 detect。
 * 主实验默认生成条件 = `thinking=True, clean, json`（配置 `main_condition`）。
 
 ### 3.5 实验四~六（最小对）
@@ -153,9 +167,10 @@ exp6|ab_choice|{audio_id}|{pair_id}（候选同声母同韵母、不同声调）
 * 由 `minimal_pairs.build_all_pairs(...)` 生成；pair_type→experiment 映射：
   exp4 = {sh_zh, aspiration, nasal_lateral}；exp5 = {front_back_nasal_ptr, i_ü, ian_üan}；
   exp6 = {tone}。
-* 每个最小对实例（pair × voice × tone 的两侧音频）的每条音频生成 4 个提示条件任务。
-* 主实验使用全量最小对实例；消融按最小对池抽样（配置 `pair_sampling`，默认每个 pair_type
-  最多 256 个实例，池子不足则全取；i/ü 80、ian/üan 48 全取）。
+* 每个最小对实例的每条音频生成 free / correct_target / wrong_target（仅 exp4/5）/ ab_choice；
+  exp6 声调对两侧无调 target 相同，wrong_target 不生成。
+* 主实验使用全量最小对实例；消融按最小对池抽样（每个 pair_type ≤256 实例，池子不足全取；
+  i/ü 80、ian/üan 48 全取）。
 
 ## 4. 条件、运行与生成记录
 
@@ -172,12 +187,13 @@ output_form     ∈ {"json", "text"}
 
 * 主实验（报告主结果）：`configs/*.yaml` 的 `main_condition`，默认
   `thinking=true, clean, json`，在主任务全量上跑。
-* 消融：每个「提示条件 × 生成维度」条件 256 条，按 `voice|tone` 16 层 × 16 条抽样，固定 seed；
-  同一提示条件的 256 条在 8 个生成条件下复用（配对比较有效）。即：
-  `ablation_core_items.txt` = 固定 256 个音频（分层）× {free, correct_target, 检测主集选中的
-  wrong_target 正类} = 3 个提示条件 × 256 条 = 768 条（同时保证 256 个完整检测配对）；
-  `ablation_pairs_items.txt` = 按 pair_type 抽取实例（每类 ≤256 实例，i/ü 80、ian/üan 48 全取），
-  每个被选中实例的 4 个提示条件任务全部保留。
+* 消融：每个「提示条件/任务 × 生成维度」条件 256 条，按 `voice|tone` 16 层 × 16 条抽样，
+  固定 seed；同一子集在 8 个生成条件下复用（配对比较有效）。即：
+  * `ablation_core_items.txt` = 3 个提示条件 × 256 条 = 768 条；
+  * `ablation_detection_items.txt` = 256 个音频 × 全部 6 个检测任务 = 1536 条
+    （保证检测 main 与 typed 子集都可算）；
+  * `ablation_pairs_items.txt` = 按 pair_type 抽取实例（每类 ≤256 实例，i/ü 80、ian/üan 48 全取），
+    每个被选中实例的全部提示条件任务保留。
 * 噪声音频缓存到 `data/noisy/{audio_id}__snr20db.wav`（16-bit PCM WAV，确定性种子）。
 
 ### 4.2 生成记录 GenerationRecord
@@ -238,8 +254,8 @@ def recognition_metrics(rows: Sequence[Mapping]) -> dict
 #     "joint_accuracy": float}
 
 def detection_metrics(rows: Sequence[Mapping]) -> dict
-# 每行必须有 detection_role ∈ {"neg","pos"}；pred_consistent 为 bool|None，语义是
-# “模型判定音频与声称一致”（True=一致）。错误检测的正类是“不一致”：
+# 行来自检测实验（detect）：neg=一致样本，pos=不一致变体；pred_consistent 为 bool|None，
+# 语义是“模型判定音频与声称一致”（True=一致）。错误检测的正类是“不一致”：
 #   判为不一致 = (pred_consistent is False)
 #   TP: pos & 判为不一致; FP: neg & 判为不一致; TN: neg & 判为一致; FN: pos & 判为一致
 # -> {"n_neg","n_pos","n_failures_neg","n_failures_pos",
@@ -296,13 +312,14 @@ def paired_outcomes(rows_a, rows_b, *, item_key="item_id", correctness_key="is_c
 
 ## 8. scoring / report 契约（Lead 实现）
 
-`items.parquet` 列 = `ItemResult` 字段。`scoring.score_run(run_dir) -> DataFrame`。
+`items.parquet` 列 = `ItemResult` 字段（含 `task_type`）。`scoring.score_run(run_dir) -> DataFrame`。
 `report.write_report(run_dir, out_dir) -> dict[str, str]` 读取 items.parquet +
 `run_manifest.json`（含 config 快照、模型 id、调用日期、数据 commit、prompt 版本、
-mapping sha256），输出 `report.md`、`metrics.csv`、`detection.csv`、`confusion/*.csv`、
-`summary.json`；报告必须包含：设计文档“实验×指标矩阵”对应表、逐 voice 与总体、
-95% bootstrap CI、随机/多数类基线、EP/ER/F1/FPR/FNR、困惑矩阵、解析失败率、
-McNemar 条件比较 + Holm/BH 校正、最小对计数表。
+mapping sha256），输出 `report.md`、`metrics.csv`、`detection.csv`、`ablation.csv`、
+`comparisons.csv`、`baselines.csv`、`confusion/*.csv`、`summary.json`；
+报告对应 2026-10-28 设计矩阵：实验一/二只报 Tone；检测实验报 EP/ER/F1/FPR/FNR；
+实验三/四/五/六与 A/B 不变；另含 95% bootstrap CI、基线、混淆矩阵、解析失败率、
+McNemar + Holm/BH。
 
 ## 9. 测试与验收
 

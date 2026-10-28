@@ -200,35 +200,50 @@ def _extract_marker_value(text: str, marker: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _parse_consistency_json(obj: dict[str, Any], normalizer: OutputNormalizer) -> ParsedPrediction:
-    raw_consistent = _lookup(obj, CONSISTENT_ALIASES)
+def _parse_tone_json(obj: dict[str, Any], normalizer: OutputNormalizer) -> ParsedPrediction:
     raw_tone = _lookup(obj, TONE_ALIASES)
-    consistent = _parse_bool(raw_consistent)
     tone = normalizer.normalize_tone(raw_tone)
-    if consistent is None:
-        return ParsedPrediction("parse_error", tone=tone, reason="missing/invalid consistent field")
-    return ParsedPrediction("ok", consistent=consistent, tone=tone)
+    if tone is None:
+        return ParsedPrediction("parse_error", reason="missing/invalid tone field")
+    return ParsedPrediction("ok", tone=tone)
 
 
-def _parse_consistency_text(text: str, normalizer: OutputNormalizer) -> ParsedPrediction:
-    consistent: bool | None = None
-    # negative phrase first: 不一致 contains 一致
-    if re.search(r"不一致", text):
-        consistent = False
-    elif re.search(r"一致", text):
-        consistent = True
-    elif re.search(r"不匹配|不吻合", text):
-        consistent = False
-    elif re.search(r"匹配|吻合", text):
-        consistent = True
+def _parse_tone_text(text: str, normalizer: OutputNormalizer) -> ParsedPrediction:
     tone_text = _extract_marker_value(text, "声调")
     if tone_text is None:
         match = re.search(r"声调[^\n0-9一二三四]{0,8}([1-4一二三四])", text)
         tone_text = match.group(1) if match else None
     tone = normalizer.normalize_tone(tone_text)
-    if consistent is None or tone is None:
-        reason = "missing consistent marker" if consistent is None else "missing tone marker"
-        return ParsedPrediction("parse_error", consistent=consistent, tone=tone, reason=reason)
+    if tone is None:
+        return ParsedPrediction("parse_error", reason="missing tone marker")
+    return ParsedPrediction("ok", tone=tone)
+
+
+def _parse_detect_json(obj: dict[str, Any], normalizer: OutputNormalizer) -> ParsedPrediction:
+    raw_consistent = _lookup(obj, CONSISTENT_ALIASES)
+    consistent = _parse_bool(raw_consistent)
+    tone = normalizer.normalize_tone(_lookup(obj, TONE_ALIASES))
+    if consistent is None:
+        return ParsedPrediction("parse_error", tone=tone, reason="missing/invalid consistent field")
+    return ParsedPrediction("ok", consistent=consistent, tone=tone)
+
+
+def _parse_detect_text(text: str, normalizer: OutputNormalizer) -> ParsedPrediction:
+    consistent: bool | None = None
+    # preferred marker from the design doc: 一致=是 / 一致=否
+    marker = re.search(r"一致\s*[=:：]\s*(是|否|一致|不一致|true|false|True|False)", text)
+    if marker:
+        consistent = _parse_bool(marker.group(1))
+    if consistent is None:
+        # tolerate 一致性=... and bare 一致/不一致 sentences (negative first)
+        if re.search(r"不一致|不匹配|不吻合", text):
+            consistent = False
+        elif re.search(r"一致|匹配|吻合", text):
+            consistent = True
+    tone_text = _extract_marker_value(text, "声调")
+    tone = normalizer.normalize_tone(tone_text)
+    if consistent is None:
+        return ParsedPrediction("parse_error", tone=tone, reason="missing consistent marker")
     return ParsedPrediction("ok", consistent=consistent, tone=tone)
 
 
@@ -311,10 +326,24 @@ def _normalise_choice(value: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+JSON_PARSERS = {
+    "free": _parse_free_json,
+    "tone": _parse_tone_json,
+    "detect": _parse_detect_json,
+    "ab": _parse_ab_json,
+}
+TEXT_PARSERS = {
+    "free": _parse_free_text,
+    "tone": _parse_tone_text,
+    "detect": _parse_detect_text,
+    "ab": _parse_ab_text,
+}
+
+
 def parse_prediction(
     text: str,
     *,
-    task_kind: str,
+    task_type: str,
     output_form: str,
     normalizer: OutputNormalizer,
 ) -> ParsedPrediction:
@@ -329,23 +358,15 @@ def parse_prediction(
             if _looks_refused(raw):
                 return ParsedPrediction("refused", reason="json output missing, refusal-like text")
             return ParsedPrediction("parse_error", reason="no JSON object found")
-        if task_kind == "free":
-            return _parse_free_json(obj, normalizer)
-        if task_kind == "consistency":
-            return _parse_consistency_json(obj, normalizer)
-        if task_kind == "ab_choice":
-            return _parse_ab_json(obj)
-        raise ValueError(f"unknown task_kind {task_kind!r}")
-
+        parser = JSON_PARSERS.get(task_type)
+        if parser is None:
+            raise ValueError(f"unknown task_type {task_type!r}")
+        return parser(obj, normalizer) if task_type != "ab" else parser(obj)
     if output_form == "text":
-        if task_kind == "free":
-            parsed = _parse_free_text(raw, normalizer)
-        elif task_kind == "consistency":
-            parsed = _parse_consistency_text(raw, normalizer)
-        elif task_kind == "ab_choice":
-            parsed = _parse_ab_text(raw)
-        else:
-            raise ValueError(f"unknown task_kind {task_kind!r}")
+        parser = TEXT_PARSERS.get(task_type)
+        if parser is None:
+            raise ValueError(f"unknown task_type {task_type!r}")
+        parsed = parser(raw, normalizer) if task_type != "ab" else parser(raw)
         if not parsed.ok and _looks_refused(raw):
             parsed.status = "refused"
             parsed.reason = parsed.reason or "refusal-like text"
@@ -357,17 +378,12 @@ def parse_prediction(
 def parse_response(
     text: str,
     *,
-    prompt_condition: str,
+    task_type: str,
     output_form: str,
     normalizer: OutputNormalizer,
 ) -> ParsedPrediction:
-    from .prompts import task_kind
-
     return parse_prediction(
-        text,
-        task_kind=task_kind(prompt_condition),
-        output_form=output_form,
-        normalizer=normalizer,
+        text, task_type=task_type, output_form=output_form, normalizer=normalizer,
     )
 
 
