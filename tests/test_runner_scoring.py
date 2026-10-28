@@ -172,6 +172,19 @@ def test_manifest_records_reproducibility_fields(small_cfg, tiny_records, mappin
     assert manifest["counts"]["n_planned"] > 0
 
 
+def test_item_subset_accepts_comma_separated_files(small_cfg, tiny_records, mapping):
+    core, _pairs = _tasks(small_cfg, tiny_records, mapping)
+    tdir = small_cfg.path("paths.task_dir")
+    tdir.mkdir(parents=True, exist_ok=True)
+    ids_a = [t.item_id for t in core[:3]]
+    ids_b = [t.item_id for t in core[3:5]]
+    (tdir / "a.txt").write_text("\n".join(ids_a))
+    (tdir / "b.txt").write_text("\n".join(ids_b))
+    manifest = {"item_subset_source": "manifests/tasks/a.txt,manifests/tasks/b.txt"}
+    subset = scoring.load_run_item_subset(small_cfg, manifest)
+    assert subset == set(ids_a) | set(ids_b)
+
+
 def test_scoring_filters_to_planned_calls(small_cfg, tiny_records, mapping):
     core, pairs = _tasks(small_cfg, tiny_records, mapping)
     keep, subset = _audio_subset(core, n_audios=1)

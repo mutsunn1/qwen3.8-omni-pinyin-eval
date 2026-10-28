@@ -79,7 +79,7 @@
 |---|---|
 | 主实验样本量 | 全量：核心 6160 音频 × 3 提示条件 + 全部最小对实例 |
 | 主实验生成条件 | 设计文档未指定主条件；默认 `thinking=on, clean, json`（JSON 是机器评分主格式），config 可改 |
-| 消融样本量 | **每个提示条件 256 条**（4 voice × 4 tone × 16 条），8 个生成条件共用同一子集；`ablation_core_items.txt` = 768 条 |
+| 消融样本量 | **每个提示条件 256 条**（4 voice × 4 tone × 16 条），8 个生成条件共用同一子集；`ablation_core_items.txt` = 768 条（固定 256 个音频 × free + correct_target + 检测主集选中的 wrong_target 正类，保证消融检测也是 256 个完整配对） |
 | 最小对消融 | 每个 pair_type 最多 256 个实例（i/ü 80、ian/üan 48 全取，声调 256 对）；实例的两侧音频与 4 个提示条件全部保留 |
 | 检测集 | 每个音频 1 负类（exp1）+ 1 正类（exp2 变体，按 2/2/1 权重分层随机）；另构建 initial/final/tone 三个平衡子集；所有检测指标按 audio 聚类 |
 | bootstrap | percentile bootstrap，2000 次；cluster = audio_id；voice 分层；seed 固定 |

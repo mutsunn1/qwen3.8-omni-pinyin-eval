@@ -202,14 +202,16 @@ def test_pair_correct_target(pair_tasks):
 
 
 def test_ablation_subsets_deterministic(core_tasks, pair_tasks, repo_cfg):
-    a = T.sample_ablation(repo_cfg, core_tasks, pair_tasks)
-    b = T.sample_ablation(repo_cfg, core_tasks, pair_tasks)
+    detection = T.build_detection_sets(core_tasks, repo_cfg)
+    a = T.sample_ablation(repo_cfg, core_tasks, pair_tasks, detection_sets=detection)
+    b = T.sample_ablation(repo_cfg, core_tasks, pair_tasks, detection_sets=detection)
     assert a["core"] == b["core"]
     assert a["pairs"] == b["pairs"]
 
 
 def test_ablation_core_has_256_items_per_prompt_condition(core_tasks, pair_tasks, repo_cfg):
-    selection = T.sample_ablation(repo_cfg, core_tasks, pair_tasks)
+    detection = T.build_detection_sets(core_tasks, repo_cfg)
+    selection = T.sample_ablation(repo_cfg, core_tasks, pair_tasks, detection_sets=detection)
     selected = set(selection["core"])
     assert len(selected) == 3 * 256
     by_prompt = {"free": set(), "correct_target": set(), "wrong_target": set()}
@@ -221,10 +223,16 @@ def test_ablation_core_has_256_items_per_prompt_condition(core_tasks, pair_tasks
     }
     cells = {(t.voice, t.gold_tone) for t in core_tasks if t.item_id in selected}
     assert cells == {(v, tone) for v in "ABCD" for tone in (1, 2, 3, 4)}
+    # every selected audio keeps a complete detection pair -> 256 balanced pairs
+    by_id = {t.item_id: t for t in core_tasks}
+    audios_with_neg = {by_id[i].audio_id for i in selected if i in by_id and by_id[i].experiment == "exp1"}
+    audios_with_pos = {by_id[i].audio_id for i in selected if i in by_id and by_id[i].experiment == "exp2"}
+    assert audios_with_neg == audios_with_pos and len(audios_with_neg) == 256
 
 
 def test_ablation_pairs_cap(core_tasks, pair_tasks, repo_cfg):
-    selection = T.sample_ablation(repo_cfg, core_tasks, pair_tasks)
+    detection = T.build_detection_sets(core_tasks, repo_cfg)
+    selection = T.sample_ablation(repo_cfg, core_tasks, pair_tasks, detection_sets=detection)
     summary = selection["pair_instance_summary"]
     assert summary["i_ü"]["available"] == 80 and summary["i_ü"]["selected"] == 80
     assert summary["ian_üan"]["available"] == 48 and summary["ian_üan"]["selected"] == 48

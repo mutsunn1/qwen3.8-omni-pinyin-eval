@@ -11,7 +11,7 @@
 - [ ] 账号已开通 Qwen3.8-Omni-Flash（或改 `configs/base.yaml: model.model` 为可用模型 id）
 - [ ] 磁盘 ≥ 3 GB（parquet 100MB + 音频 60MB + 任务清单 230MB + 结果）
 - [ ] `configs/base.yaml` 已复核：主实验条件、消融抽样、并发/限流、模型参数
-- [ ] 已知晓调用预算：主实验 ≈ 83,321 次、消融 ≈ 88,768 次（见 README 第 2 节）
+- [ ] 已知晓调用预算：主实验 ≈ 83,321 次、消融 ≈ 88,952 次（见 README 第 2 节）
 
 ## 1. 环境与连通性
 
@@ -86,7 +86,7 @@ uv run pinyin-eval generate --tasks all --profile ablation --conditions all \
   --run-id ablation-v1 --tag ablation
 ```
 
-- 预期 88,768 次调用；
+- 预期 88,952 次调用；
 - 该 run 自带主条件（think1/clean/json）在消融子集上的重复调用，用于与其余条件**配对**
   比较；若想省预算可改为 7 个条件（去掉 `--condition` 中的主条件），但需自行保证
   report 能取到主条件基线；

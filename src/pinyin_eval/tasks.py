@@ -427,15 +427,27 @@ def build_detection_sets(core_tasks: Sequence[TaskItem], cfg: Config) -> pd.Data
 # ---------------------------------------------------------------------------
 
 
-def sample_ablation(cfg: Config, core_tasks: Sequence[TaskItem],
-                    pair_tasks: Sequence[TaskItem]) -> dict[str, list[str]]:
+def sample_ablation(
+    cfg: Config,
+    core_tasks: Sequence[TaskItem],
+    pair_tasks: Sequence[TaskItem],
+    detection_sets: pd.DataFrame | None = None,
+) -> dict[str, list[str]]:
     """Return the fixed item-id subsets used by the ablation grid.
 
     Design: "消融每个条件 256 条，按 4 voice x 4 tone x 16 分层" — a *condition*
-    is (prompt condition x thinking x audio quality x output form).  Therefore
-    every prompt-condition view gets its own fixed 256-item subset, stratified by
-    voice|tone (16 items per cell).  The same items are replayed for every
-    generation condition, which keeps the paired comparisons valid.
+    is (prompt condition x thinking x audio quality x output form).  The core
+    subset therefore fixes 256 audios (16 per voice|tone cell) and keeps, for each
+    audio, exactly:
+
+    * the ``free`` task (experiment 3 view) -> 256 items,
+    * the ``correct_target`` task (experiment 1 view) -> 256 items,
+    * the detection-selected ``wrong_target`` positive (experiment 2 view)
+      -> 256 items, which also makes 256 complete detection pairs available.
+
+    Hence 768 items total and exactly 256 items per prompt condition; the same
+    items are replayed for every generation condition so the comparisons are
+    paired.
 
     Minimal pairs: sample up to ``cap`` pair instances per ``pair_type`` (both
     sides, all prompt conditions of those instances); categories smaller than the
@@ -447,29 +459,45 @@ def sample_ablation(cfg: Config, core_tasks: Sequence[TaskItem],
     pair_cap = int(cfg.get("tasks.minimal_pairs.ablation_per_type_cap", 256))
     tone_cap = int(cfg.get("tasks.minimal_pairs.tone_ablation_pairs", 256))
 
-    # --- core (experiments 1-3 views): 256 items per prompt condition ---
-    core_selected: list[str] = []
-    by_prompt: dict[str, list[TaskItem]] = defaultdict(list)
+    # --- core: 256 audios stratified by voice|tone ---
+    by_stratum: dict[str, dict[str, TaskItem]] = defaultdict(dict)
     for task in core_tasks:
-        by_prompt[task.prompt_condition].append(task)
-    for prompt_condition in sorted(by_prompt):
-        tasks_for_prompt = by_prompt[prompt_condition]
-        by_stratum: dict[str, list[TaskItem]] = defaultdict(list)
-        for task in tasks_for_prompt:
-            by_stratum[task.stratum].append(task)
-        chosen: list[str] = []
-        for stratum in sorted(by_stratum):
-            pool = sorted(by_stratum[stratum], key=lambda t: t.item_id)
-            rng = _rng(seed, "ablation-core", prompt_condition, stratum)
-            k = min(strata_per_cell, len(pool))
-            idx = rng.choice(len(pool), size=k, replace=False)
-            chosen.extend(pool[int(i)].item_id for i in sorted(idx))
-        if len(chosen) != per_condition:
-            log.warning(
-                "ablation core[%s] selected %d items (target %d)",
-                prompt_condition, len(chosen), per_condition,
-            )
-        core_selected.extend(chosen)
+        if task.prompt_condition == "free":
+            by_stratum[task.stratum][task.audio_id] = task
+    selected_audios: set[str] = set()
+    for stratum in sorted(by_stratum):
+        audio_ids = sorted(by_stratum[stratum])
+        rng = _rng(seed, "ablation-core", stratum)
+        k = min(strata_per_cell, len(audio_ids))
+        idx = rng.choice(len(audio_ids), size=k, replace=False)
+        selected_audios.update(audio_ids[int(i)] for i in sorted(idx))
+    if len(selected_audios) != per_condition:
+        log.warning(
+            "ablation core selected %d audios (target %d)", len(selected_audios), per_condition
+        )
+
+    indexed: dict[tuple[str, str], TaskItem] = {}
+    for task in core_tasks:
+        indexed.setdefault((task.audio_id, task.prompt_condition), task)
+
+    # detection positives for the 'main' detection subset (one wrong-target item
+    # per audio), so ablation detection stays balanced
+    pos_by_audio: dict[str, str] = {}
+    if detection_sets is None:
+        detection_sets = build_detection_sets(core_tasks, cfg)
+    main_rows = detection_sets[detection_sets["subset"] == "main"]
+    for row in main_rows.to_dict("records"):
+        pos_by_audio[str(row["audio_id"])] = str(row["positive_item_id"])
+
+    core_selected: list[str] = []
+    for audio_id in sorted(selected_audios):
+        for prompt_condition in ("free", "correct_target"):
+            task = indexed.get((audio_id, prompt_condition))
+            if task is not None:
+                core_selected.append(task.item_id)
+        positive_id = pos_by_audio.get(audio_id)
+        if positive_id is not None:
+            core_selected.append(positive_id)
 
     # --- minimal pairs: cap pair instances per pair_type ---
     by_type_instances: dict[str, dict[str, str]] = defaultdict(dict)
@@ -492,10 +520,8 @@ def sample_ablation(cfg: Config, core_tasks: Sequence[TaskItem],
         selected_summary[pair_type] = {"available": len(instance_ids), "selected": len(chosen)}
 
     pair_ids = [t.item_id for t in pair_tasks if t.pair_id in selected_pair_ids]
-    log.info("ablation selection: core=%d items, pairs=%d items", len(core_selected), len(pair_ids))
-    log.info("ablation core per prompt condition: %s",
-             {p: sum(1 for i in core_selected if i.startswith(f"{exp}|{p}|"))
-              for p, exp in (("free", "exp3"), ("correct_target", "exp1"), ("wrong_target", "exp2"))})
+    log.info("ablation selection: core=%d items, pairs=%d items",
+             len(core_selected), len(pair_ids))
     log.info("ablation pair instances: %s", selected_summary)
     return {
         "core": core_selected,

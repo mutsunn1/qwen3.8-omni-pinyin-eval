@@ -174,7 +174,8 @@ output_form     ∈ {"json", "text"}
   `thinking=true, clean, json`，在主任务全量上跑。
 * 消融：每个「提示条件 × 生成维度」条件 256 条，按 `voice|tone` 16 层 × 16 条抽样，固定 seed；
   同一提示条件的 256 条在 8 个生成条件下复用（配对比较有效）。即：
-  `ablation_core_items.txt` = 3 个提示条件 × 256 条 = 768 条；
+  `ablation_core_items.txt` = 固定 256 个音频（分层）× {free, correct_target, 检测主集选中的
+  wrong_target 正类} = 3 个提示条件 × 256 条 = 768 条（同时保证 256 个完整检测配对）；
   `ablation_pairs_items.txt` = 按 pair_type 抽取实例（每类 ≤256 实例，i/ü 80、ian/üan 48 全取），
   每个被选中实例的 4 个提示条件任务全部保留。
 * 噪声音频缓存到 `data/noisy/{audio_id}__snr20db.wav`（16-bit PCM WAV，确定性种子）。
@@ -307,8 +308,8 @@ McNemar 条件比较 + Holm/BH 校正、最小对计数表。
 
 * 每个模块自带 `tests/test_<module>.py`，`uv run pytest` 全绿（默认不联网）。
 * 最小对计数表必须与设计文档完全一致（见第 5 节）。
-* 数据流验收（`tests/test_e2e_mock.py`，Lead）：mock 客户端跑通
-  prepare-data → build-tasks → generate(mock) → score → report。
+* 数据流验收：mock 客户端跑通 prepare-data → build-tasks → generate(mock) → score → report
+  （`tests/test_cli.py` + `tests/test_runner_scoring.py` + `uv run pinyin-eval all-mock`）。
 * 真实 API 仅在有 `DASHSCOPE_API_KEY` 时通过 `pinyin_eval.cli smoke` 验证，
   不在 CI/默认测试中执行。
 

@@ -63,14 +63,23 @@ def load_run_tasks(cfg: Config, manifest: Mapping[str, Any], tasks: Sequence[Tas
 
 
 def load_run_item_subset(cfg: Config, manifest: Mapping[str, Any]) -> set[str] | None:
+    """Load the item-id subset of a run (may reference several comma-separated files)."""
     source = manifest.get("item_subset_source")
     if not source:
         return None
-    path = _resolve_source(cfg, str(source))
-    if not path.exists():
-        log.warning("item subset file missing: %s (scoring all tasks)", path)
-        return None
-    return set(load_item_ids(path))
+    items: set[str] = set()
+    found = False
+    for part in str(source).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        path = _resolve_source(cfg, part)
+        if not path.exists():
+            log.warning("item subset file missing: %s", path)
+            continue
+        items.update(load_item_ids(path))
+        found = True
+    return items if found else None
 
 
 # ---------------------------------------------------------------------------

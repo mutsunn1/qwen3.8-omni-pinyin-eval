@@ -117,8 +117,18 @@ final,tone}`、`generation_condition`（`think1__clean__json` 等）、`variant_
 `n_items / n_tasks / n_generations / n_unique_requests / parse_status 计数 /
 per_condition 覆盖率 / per_experiment 计数 / detection_rows`。
 
-## 12. report 产物
+## 12. report 产物（`pinyin_eval.report.write_report`）
 
-`report.md`、`metrics.csv`、`detection.csv`、`ablation.csv`、`comparisons.csv`、
-`baselines.csv`、`confusion/*.csv`、`summary.json` —— 由 `pinyin_eval.report.write_report`
-生成，列定义见 `report.py` 模块 docstring。
+| 文件 | 内容 / 列 |
+|---|---|
+| `report.md` | 中文报告：摘要、主结果（总体/逐 voice/逐最小对类型，含 95% CI）、一致性检测（main/initial/final/tone、EP/ER/F1/FPR/FNR、基线）、消融（8 生成条件 × core/pairs/detection/parse）、条件对比较（McNemar + 配对 bootstrap + Holm）、混淆矩阵 top-10、附录（数据事实、最小对计数、检测集构成、解析失败、模型/参数/版本、工件清单） |
+| `metrics.csv` | `scope, experiment, prompt_condition, condition_id, generation_condition, voice, pair_type, subset, dimension, metric, value, ci_lo, ci_hi, n, n_failures` |
+| `detection.csv` | `scope, generation_condition, voice, subset, dimension, metric, value, ci_lo, ci_hi, n, n_failures, tp, fp, tn, fn, n_neg, n_pos` |
+| `ablation.csv` | `scope(主条件/消融条件), compared_with, is_main, condition_id, generation_condition, group(core/pairs/detection/parse), experiment, prompt_condition, dimension, metric, value, n, n_failures` |
+| `comparisons.csv` | `family, metric, dimension, axis(thinking/audio_quality/output_form), condition_a, condition_b, n_pairs, acc_a, acc_b, diff, diff_lo, diff_hi, mcnemar_b, mcnemar_c, p, p_holm, method` |
+| `baselines.csv` | `scope, experiment, subset, dimension, baseline(random/majority), value, label, n` |
+| `confusion/exp3_{initial,final,tone}_overall.csv`、`..._voice_{A-D}.csv` | 混淆矩阵（行=gold，列=pred） |
+| `summary.json` | 机器可读摘要：run 元信息、主条件、生成条件列表、解析统计、bootstrap 设置、各实验 headline 指标、工件路径 |
+
+> 报告不重算预测：所有指标都来自 `items.parquet` + `detection_rows.parquet`，并直接调用
+> `metrics/*` 函数，保证与手工调用一致。

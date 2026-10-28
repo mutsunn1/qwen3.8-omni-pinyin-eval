@@ -12,7 +12,7 @@
 6160 条 16 kHz 单声道 WAV；4 个 TTS voice × 1540；声调 1–4 各 1540）。
 模型：阿里云百炼 **Qwen3.8-Omni-Flash**（`qwen3.8-omni-flash`）。
 
-> 当前状态：框架已完成并通过 205 个离线测试；`all-mock` 可在无 API key 的情况下跑通
+> 当前状态：框架已完成并通过 226 个离线测试；`all-mock` 可在无 API key 的情况下跑通
 > `prepare-data → build-tasks → generate(mock) → score → report` 全链路。
 > 真实 API 调用尚未执行（本机未配置 `DASHSCOPE_API_KEY` / 业务空间 `DASHSCOPE_BASE_URL`）。
 
@@ -51,8 +51,8 @@ uv run pinyin-eval report --run-id <主实验 run_id>
 | 阶段 | 数据 | 条件数 | API 调用 |
 |---|---|---:|---:|
 | 主实验 | 全量 6160 音频 + 全部最小对 | 1（`think1/clean/json`） | 83,321 |
-| 消融 | 固定子集（core 768 + pairs 11,264 条任务） | 8 | 88,768 |
-| 合计 | — | — | **172,089** |
+| 消融 | 固定子集（core 768 + pairs 11,264 条任务） | 8 | 88,952 |
+| 合计 | — | — | **172,273** |
 
 > 模型参数、prompt 版本、数据集 commit、mapping sha256、条件网格都会写入
 > `results/runs/<run_id>/run_manifest.json`；预测按 `request_id` 去重后逐条落盘，
@@ -158,7 +158,7 @@ src/pinyin_eval/
   scoring.py cli.py
   data/dataset.py data/minimal_pairs.py
   metrics.py stats.py report.py tasks.py
-tests/                         # 205 个离线测试（无网络/无 key）
+tests/                         # 226 个离线测试（无网络/无 key）
 ```
 
 ## 6. 模型调用细节（百炼 OpenAI 兼容接口）
@@ -186,12 +186,16 @@ tests/                         # 205 个离线测试（无网络/无 key）
 ## 8. 测试
 
 ```bash
-uv run pytest                 # 205 passed（离线）
+uv run pytest                 # 226 passed（离线）
 uv run ruff check src tests   # All checks passed
 ```
 
 覆盖：规范化/解析、prompt 指纹去重、任务构造（实验一~六、检测集、消融抽样）、
-数据准备与噪声注入、指标与统计、mock 端到端（含断点续跑、去重、失败记录）、报告生成。
+数据准备与噪声注入、指标与统计、mock 端到端（含断点续跑、去重、失败记录）、报告生成
+（含报告数字与 metrics/stats 直接调用逐项对拍、bootstrap CI 复算、CSV 列稳定、seed 复现）。
+
+> 报告生成耗时参考：mock 96k items / 8 条件 run（n_boot=2000）约 25 秒；单条件 1.4k items 约 2 秒。
+> 真实全量主实验（83k 请求 → ~137k items）报告约 1 分钟量级。
 
 ## 9. 已知限制 / TODO
 

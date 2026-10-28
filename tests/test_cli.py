@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 import yaml
 
 from pinyin_eval.cli import build_parser, main

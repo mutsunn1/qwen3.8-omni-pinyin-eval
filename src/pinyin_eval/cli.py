@@ -304,7 +304,7 @@ def cmd_build_tasks(args: argparse.Namespace) -> int:
                 return 1
             print("minimal-pair counts match the design document ✓")
 
-    selection = sample_ablation(cfg, core, pairs)
+    selection = sample_ablation(cfg, core, pairs, detection_sets=detection)
     write_item_ids(selection["core"], tdir / "ablation_core_items.txt")  # type: ignore[arg-type]
     if pairs:
         write_item_ids(selection["pairs"], tdir / "ablation_pairs_items.txt")  # type: ignore[arg-type]
