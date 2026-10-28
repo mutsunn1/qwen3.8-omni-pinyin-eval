@@ -1,0 +1,17 @@
+# data (downloaded / derived; reproducible via CLI)
+data/raw/
+data/audio/
+data/noisy/
+data/manifests/
+# results (regenerable)
+results/
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+# os
+.DS_Store
+# local env
+.env

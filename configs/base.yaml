@@ -1,0 +1,121 @@
+# ---------------------------------------------------------------------------
+# pinyin-eval base configuration
+#
+# 实验设计见 docs/experiment-design.md（冻结快照）；接口见 docs/contracts.md。
+# 所有相对路径都相对于仓库根目录解析。
+# ---------------------------------------------------------------------------
+
+project:
+  name: qwen38-omni-pinyin
+  # 全局随机种子：任务构造、噪声注入、bootstrap、抽样都用它派生
+  seed: 20261028
+  # 记录到 run_manifest 的调用日期由 runner 自动写入；这里保留实验负责人信息
+  operator: ""
+
+dataset:
+  hf_repo: HaitongSUN/prosodic-abx
+  # 设计文档指定的 commit（固定版本，保证可复现）
+  hf_revision: d607806619aba678030dac10ea086fb19347205a
+  config_name: mandarin_tone_syn
+  split: train
+  # 设计文档称音频为原始单声道 16 kHz / 16-bit：已核验实际为 WAV PCM_16 16 kHz mono
+  expect_sample_rate: 16000
+  expect_channels: 1
+  keep_original_audio: true
+
+paths:
+  raw_parquet: data/raw/mandarin_tone_syn.parquet
+  mapping_csv: data/mapping/mandarin_tone_syn_target_mapping.csv
+  audio_dir: data/audio
+  noisy_dir: data/noisy
+  manifest_dir: data/manifests
+  task_dir: data/manifests/tasks
+  results_dir: results
+
+model:
+  # 阿里云百炼（DashScope）OpenAI 兼容接口
+  provider: dashscope_openai
+  # 设计文档：Qwen3.8-Omni；百炼当前文本输出模型 id 为 qwen3.8-omni-flash
+  # 若改用快照版本（如 qwen3.8-omni-flash-YYYY-MM-DD），在此处替换并记录
+  model: qwen3.8-omni-flash
+  api_key_env: DASHSCOPE_API_KEY
+  # 百炼要求使用“业务空间服务地址”；不同地域不同。形如：
+  #   https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  # 未设置环境变量时回退到公共兼容地址（是否可用取决于账号/地域）。
+  base_url_env: DASHSCOPE_BASE_URL
+  base_url_default: https://dashscope.aliyuncs.com/compatible-mode/v1
+  # 固定解码参数（设计文档 四）
+  temperature: 0.0
+  top_p: 1.0
+  max_output_tokens: 256
+  # 思考开关：Qwen3.8-Omni 默认开启思考；关闭用 reasoning_effort="none"
+  thinking_param: reasoning_effort
+  # 思考开启时：null = 不发送 reasoning_effort，使用模型默认思考力度（Qwen3.8-Omni 默认开启思考）
+  # 如需固定力度可填 low / medium / high（以百炼文档为准）
+  thinking_on_reasoning_effort: null
+  thinking_off_reasoning_effort: none
+  # 是否额外发送 enable_thinking（默认不发，避免与 reasoning_effort 冲突）
+  send_enable_thinking: false
+  modalities: ["text"]
+  request_timeout_s: 120
+  max_retries: 6
+  retry_backoff_s: 2.0
+  retry_max_backoff_s: 90.0
+  # 并发与限流（百炼 Omni 限流较严，初值保守）
+  concurrency: 4
+  qps: null
+  # 流式调用：非流式即可；开启 stream 时解析并拼接 content/reasoning_content
+  stream: false
+
+generation:
+  # 主实验条件（全量数据）
+  main_condition:
+    thinking: true
+    audio_quality: clean
+    output_form: json
+  # 全因子消融网格（设计文档 四）
+  thinking_levels: [true, false]
+  audio_qualities: [clean, noise_20db]
+  output_forms: [json, text]
+  noise_snr_db: 20
+  # 单次请求输出上限（与 model.max_output_tokens 对齐）
+  max_output_tokens: 256
+
+tasks:
+  # 实验二：每个样本 5 个错误变体 = 2 改声母 + 2 改韵母 + 1 改声调
+  exp2:
+    n_initial_variants: 2
+    n_final_variants: 2
+    n_tone_variants: 1
+    # 声调变体是否在给定目标中写入声调数字（否则“改声调”不可能成立）
+    tone_variant_keeps_segment: true
+  ablation:
+    # 消融每个条件 256 条，按 4 voice x 4 tone x 16 分层（设计文档 四）
+    items_per_condition: 256
+    strata_per_voice_tone: 16
+  detection:
+    # 主检测集：每个音频 1 负类 + 1 正类（2 改声母 / 2 改韵母 / 1 改声调 分层随机抽 1）
+    strata_weights: {initial: 2, final: 2, tone: 1}
+    # 分类型平衡子集：initial / final / tone 各 6160 正 + 6160 负
+    subsets: [main, initial, final, tone]
+  minimal_pairs:
+    # 前后鼻音默认只含 an/ang、en/eng、in/ing（与设计文档计数 40 一致）；
+    # 设为 true 会额外加入 ian/iang、uan/uang（52 对，超出设计文档表）
+    include_wide_nasal: false
+    # 消融抽样：每个 pair_type 最多取多少个实例（池子不足则全取）
+    ablation_per_type_cap: 256
+    tone_ablation_pairs: 256
+
+stats:
+  n_boot: 2000
+  alpha: 0.05
+  ci: 0.95
+  # bootstrap 以 audio 聚类、voice 分层（设计文档）
+  stratify_key: voice
+
+report:
+  # per_voice / confusion / detection subsets / mcnemar 条件比较
+  per_voice: true
+  confusion_matrices: true
+  mcnemar: true
+  multiple_comparison: holm
