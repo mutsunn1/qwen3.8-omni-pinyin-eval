@@ -23,36 +23,42 @@ from typing import Any, ClassVar
 
 EXPERIMENTS: tuple[str, ...] = ("exp1", "exp2", "exp3", "detect", "exp4", "exp5", "exp6")
 EXPERIMENT_TITLES: dict[str, str] = {
-    "exp1": "exp1_correct_target_tone",
-    "exp2": "exp2_wrong_target_tone",
-    "exp3": "exp3_free_recognition",
+    "exp1": "exp1_correct_info_tone",
+    "exp2": "exp2_wrong_info_tone",
+    "exp3": "exp3_free_detection",
     "detect": "detect_consistency",
-    "exp4": "exp4_initial_minimal_pairs",
-    "exp5": "exp5_final_minimal_pairs",
-    "exp6": "exp6_tone_minimal_pairs",
+    "exp4": "exp4_initial_sub_experiments",
+    "exp5": "exp5_final_sub_experiments",
+    "exp6": "exp6_tone_sub_experiments",
 }
 
 #: task types (output schema) sent to the model
-TASK_TYPES: tuple[str, ...] = ("free", "tone", "detect", "ab")
+TASK_TYPES: tuple[str, ...] = ("free", "tone", "initial", "final", "detect")
 
-PROMPT_CONDITIONS: tuple[str, ...] = ("free", "correct_target", "wrong_target", "detect", "ab_choice")
+PROMPT_CONDITIONS: tuple[str, ...] = ("free", "correct_target", "wrong_target", "detect")
 PROMPT_CONDITION_TITLES: dict[str, str] = {
-    "free": "自由识别",
-    "correct_target": "目标条件（正确目标）",
-    "wrong_target": "目标条件（错误目标）",
+    "free": "自由检测",
+    "correct_target": "正确信息",
+    "wrong_target": "错误信息",
     "detect": "检测一致性",
-    "ab_choice": "A/B 辨别",
 }
 
-#: prompt conditions allowed per experiment (design section 四)
+#: prompt conditions allowed per experiment (v3 design section 四)
 EXPERIMENT_PROMPT_CONDITIONS: dict[str, tuple[str, ...]] = {
     "exp1": ("free", "correct_target", "wrong_target"),
     "exp2": ("free", "correct_target", "wrong_target"),
     "exp3": ("free", "correct_target", "wrong_target"),
     "detect": ("detect",),
-    "exp4": ("free", "correct_target", "wrong_target", "ab_choice"),
-    "exp5": ("free", "correct_target", "wrong_target", "ab_choice"),
-    "exp6": ("free", "correct_target", "wrong_target", "ab_choice"),
+    "exp4": ("free", "correct_target", "wrong_target"),
+    "exp5": ("free", "correct_target", "wrong_target"),
+    "exp6": ("free", "correct_target", "wrong_target"),
+}
+
+#: minimal-pair experiment -> output dimension (v3: each is a sub-experiment set)
+EXPERIMENT_DIMENSION: dict[str, str] = {
+    "exp4": "initial",
+    "exp5": "final",
+    "exp6": "tone",
 }
 
 OUTPUT_FORMS: tuple[str, ...] = ("json", "text")
@@ -158,11 +164,14 @@ class TaskItem:
     pair_side: str | None = None
     variant_type: str | None = None          # exp2: initial | final | tone
     variant_index: int | None = None         # 0/1 for init & final variants, 0 for tone
-    given_target: str | None = None          # what the prompt claims (canonical spelling)
-    given_tone: int | None = None            # set only when the claim carries a tone digit
-    consistent_gold: bool | None = None      # target conditions only
-    alternatives: list[str] | None = None    # ab_choice only, order ["A","B"]
-    correct_choice: str | None = None        # ab_choice only: "A" | "B"
+    given_target: str | None = None          # toneless claim (exp1/2, detection)
+    given_initial: str | None = None         # v3 target-information prompt (exp4-6)
+    given_final: str | None = None
+    given_tone: int | None = None            # target_tone (detection, exp4-6 info prompts)
+    consistent_gold: bool | None = None      # target/detection conditions
+    # kept for backward-compatible JSONL; v3 design has no A/B task
+    alternatives: list[str] | None = None
+    correct_choice: str | None = None
     stratum: str = ""                        # voice|tone, for stratified sampling
     task_type: str = ""                      # free | tone | detect | ab (output schema)
     prompt_texts: dict[str, str] | None = None   # {"json":..., "text":...} built by tasks.py
@@ -276,8 +285,11 @@ class ItemResult:
     # positives = inconsistent claims of the detection experiment); None otherwise.
     detection_role: str | None = None
     detection_subset: str | None = None
-    # output schema of the task: free | tone | detect | ab
+    # output schema of the task: free | tone | initial | final | detect
     task_type: str = ""
+    # v3 target-information fields (experiments 4-6)
+    given_initial: str | None = None
+    given_final: str | None = None
 
     PARSE_STATUSES: ClassVar[tuple[str, ...]] = PARSE_STATUSES
 
@@ -322,6 +334,7 @@ def make_pair_id(pair_type: str, target_a: str, target_b: str, voice: str, tone:
 __all__ = [
     "AUDIO_QUALITIES",
     "EXPERIMENTS",
+    "EXPERIMENT_DIMENSION",
     "TASK_TYPES",
     "EXPERIMENT_METRIC_DIMENSION",
     "EXPERIMENT_PROMPT_CONDITIONS",

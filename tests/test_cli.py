@@ -38,9 +38,9 @@ def test_cli_pipeline(cli_args, tiny_parquet_cfg):
     assert main(cli_args + ["build-tasks"]) == 0
     task_dir = tiny_parquet_cfg.path("paths.task_dir")
     for name in ("core.jsonl", "detection.jsonl", "pairs.jsonl", "detection_sets.csv",
-                 "ablation_core_items.txt", "ablation_detection_items.txt",
-                 "ablation_pairs_items.txt"):
+                 "ablation_core_items.txt", "ablation_pairs_items.txt"):
         assert (task_dir / name).exists(), name
+    assert not (task_dir / "ablation_detection_items.txt").exists()  # v3: no detection ablation
 
     assert main(cli_args + [
         "generate", "--tasks", "all", "--mock", "--run-id", "cli-run",
@@ -50,16 +50,22 @@ def test_cli_pipeline(cli_args, tiny_parquet_cfg):
     run_dir = tiny_parquet_cfg.path("paths.results_dir") / "runs" / "cli-run"
     assert (run_dir / "items.parquet").exists()
     assert (run_dir / "detection_rows.parquet").exists()
+    assert main(cli_args + ["cost", "--run-id", "cli-run"]) == 0
     summary = json.loads((run_dir / "score_summary.json").read_text())
     assert summary["n_items"] > 0
     assert summary["parse_status"].get("ok", 0) == summary["n_items"]
     assert summary["per_experiment"].get("detect", {}).get("n", 0) > 0
 
 
-def test_estimate_and_dry_run(cli_args, tiny_parquet_cfg):
+def test_estimate_and_dry_run(cli_args, tiny_parquet_cfg, capsys):
     assert main(cli_args + ["prepare-data", "--skip-download"]) == 0
     assert main(cli_args + ["build-tasks", "--skip-pairs"]) == 0
+    capsys.readouterr()  # drop build-tasks output
     assert main(cli_args + ["estimate", "--tasks", "core", "--profile", "main"]) == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{"):])
+    assert payload["cost_estimate"]["n_requests"] == payload["n_requests"] > 0
+    assert payload["cost_estimate"]["conservative_cost_cny"] > 0
     assert main(cli_args + [
         "generate", "--tasks", "core", "--dry-run", "--run-id", "dry",
     ]) == 0
@@ -68,6 +74,24 @@ def test_estimate_and_dry_run(cli_args, tiny_parquet_cfg):
     assert plan.exists() and plan.stat().st_size > 0
     lines = plan.read_text().strip().splitlines()
     assert len(lines) > 0
+
+
+def test_minimal_build(cli_args, tiny_parquet_cfg):
+    assert main(cli_args + ["prepare-data", "--skip-download"]) == 0
+    assert main(cli_args + ["build-tasks", "--minimal"]) == 0
+    task_dir = tiny_parquet_cfg.path("paths.task_dir")
+    for name in ("minimal_items.txt", "minimal_no_detection_items.txt",
+                 "minimal_summary.json", "minimal_core_items.txt",
+                 "minimal_detection_items.txt", "minimal_pair_items.txt"):
+        assert (task_dir / name).exists(), name
+    summary = json.loads((task_dir / "minimal_summary.json").read_text())["summary"]
+    assert summary["n_all_items"] > 0
+    assert summary["n_all_items"] == (
+        summary["n_core_tasks"] + summary["n_detection_tasks"] + summary["n_pair_tasks"]
+    )
+    assert summary["n_no_detection_items"] == (
+        summary["n_core_tasks"] + summary["n_pair_tasks"]
+    )
 
 
 def test_generate_without_tasks_fails(cli_args, tiny_parquet_cfg):

@@ -82,8 +82,10 @@ docs/                 # 设计快照、契约、运行协议
 
 ### 3.1 任务目录与去重（重要）
 
-> 2026-10-28 设计更新：实验一/二只评声调（不再做一致性判定）；新增独立**检测实验**
-> （target + target_tone → 只输出 `{"consistent"}`）。详见 `docs/experiment-design.md`。
+> 2026-10-28 **v3** 设计更新：实验一/二只评声调；新增独立检测实验（target+target_tone →
+> `{"consistent"}`）；**取消 A/B 任务**；实验四/五/六各拆为自由检测/正确信息/错误信息
+> 三个子实验（输出 initial/final/tone）；**检测实验不参与消融**。
+> 详见 `docs/experiment-design.md`（v3 快照）。
 
 三个任务目录：
 
@@ -94,11 +96,10 @@ docs/                 # 设计快照、契约、运行协议
     5 个“只改声母/韵母”的错误无调 target：2 改声母 + 2 改韵母 + 1 额外段错误）
 * `tasks/detection.jsonl` —— 检测实验：每音频 1 个一致样本（原始 target+label 声调）
   + 5 个不一致变体（2 改声母 / 2 改韵母 / 1 改声调），task_type=detect。
-* `tasks/pairs.jsonl` —— 最小对音频（实验四/五/六视图）：
-  * free（task_type=free）、correct_target（tone，给本侧无调 target）、
-    ab_choice（task_type=ab）
-  * wrong_target（tone，给对侧无调 target）仅 exp4/exp5；exp6 声调对两侧无调 target
-    相同，无法表达“错误目标”，跳过（见 decisions）。
+* `tasks/pairs.jsonl` —— 最小对音频（实验四/五/六视图），每实例侧 3 个子实验：
+  * free（无目标信息）、correct_target（给 target_initial/final/tone 全对）、
+    wrong_target（只改对应维度：exp4 改 initial、exp5 改 final、exp6 改 tone）；
+  * task_type 分别为 exp4=`initial`、exp5=`final`、exp6=`tone`；v3 无 A/B。
 
 **跨实验视图、跨条件的重复请求只发一次**：
 `TaskItem.task_type` 决定输出 schema；`TaskItem.prompt_texts={"json":..., "text":...}`，
@@ -119,11 +120,9 @@ detect|detect|{audio_id}|{variant_type}{variant_index}       # 不一致变体�
 exp4|free|{audio_id}
 exp4|correct_target|{audio_id}
 exp4|wrong_target|{audio_id}                # 给对侧最小对目标（无调）
-exp4|ab_choice|{audio_id}                   # 候选 [本音频带调拼音, 对侧带调拼音]
 exp5|… 同 exp4（experiment 改为 exp5）
 exp6|free|{audio_id}|{pair_id}；exp6|correct_target|…；
-exp6|wrong_target|{audio_id}|{pair_id}（本音频拼音 + 对侧错误声调数字）；
-exp6|ab_choice|{audio_id}|{pair_id}（候选同声母同韵母、不同声调）
+exp6|wrong_target|{audio_id}|{pair_id}（错误信息只改 target_tone）
 
 注意：最小对任务（实验四~六）的 item_id 一律带 `|{pair_id}` 后缀——同一条音频可同时属于
 多个声调最小对（如 ai1 属于 (1,2)(1,3)(1,4) 三对），只靠 audio_id 会冲突。
@@ -144,9 +143,10 @@ exp6|ab_choice|{audio_id}|{pair_id}（候选同声母同韵母、不同声调）
   `given_tone=None`，`consistent_gold=False`，`variant_type=initial|final`。
 * 检测实验：`given_target` + `given_tone` 均给出；一致样本 = 原始 target+label；
   段错误变体 = 改动 target、`given_tone=真实声调`；声调错误变体 = 原始 target、`given_tone≠gold`。
-* `free`：`given_target=None`。
-* `ab_choice`：`alternatives=[candA, candB]` 为带声调数字拼音，`correct_choice="A"|"B"`，
-  A/B 位置按 hash 平衡。
+* 实验四~六信息子实验：`given_initial`/`given_final`/`given_tone` 均给出；
+  correct_target 全对；wrong_target 只改实验对应维度，其余字段正确。
+* `free`：`given_target=None`（子实验 free 的 prompt 不含目标信息）。
+* v3 无 A/B；`alternatives/correct_choice` 字段保留但恒为 None。
 * `cluster_id` = `audio_id`；检测分析以 audio 聚类。
 * `stratum` = `voice|tone`（消融抽样：4 voice × 4 tone × 每层 16 条）。
 
@@ -159,7 +159,7 @@ exp6|ab_choice|{audio_id}|{pair_id}（候选同声母同韵母、不同声调）
   同 initial 换 final 池中确定性抽取（配置 seed）。
 * exp3：6160 条音频 × `free`，task_type=free。
 * 检测实验：6160 条音频，每条 1 一致 + 5 不一致（2/2/1），task_type=detect；
-  其 condition 网格只有 8 个生成条件（thinking/quality/form），提示条件固定为 detect。
+  **v3：检测实验不参与消融**，只在主生成条件运行一次。
 * 主实验默认生成条件 = `thinking=True, clean, json`（配置 `main_condition`）。
 
 ### 3.5 实验四~六（最小对）
@@ -167,8 +167,8 @@ exp6|ab_choice|{audio_id}|{pair_id}（候选同声母同韵母、不同声调）
 * 由 `minimal_pairs.build_all_pairs(...)` 生成；pair_type→experiment 映射：
   exp4 = {sh_zh, aspiration, nasal_lateral}；exp5 = {front_back_nasal_ptr, i_ü, ian_üan}；
   exp6 = {tone}。
-* 每个最小对实例的每条音频生成 free / correct_target / wrong_target（仅 exp4/5）/ ab_choice；
-  exp6 声调对两侧无调 target 相同，wrong_target 不生成。
+* 每个最小对实例的每条音频生成 3 个子实验：free / correct_target / wrong_target，
+  分别输出该实验维度（exp4 initial、exp5 final、exp6 tone）。
 * 主实验使用全量最小对实例；消融按最小对池抽样（每个 pair_type ≤256 实例，池子不足全取；
   i/ü 80、ian/üan 48 全取）。
 
@@ -190,10 +190,9 @@ output_form     ∈ {"json", "text"}
 * 消融：每个「提示条件/任务 × 生成维度」条件 256 条，按 `voice|tone` 16 层 × 16 条抽样，
   固定 seed；同一子集在 8 个生成条件下复用（配对比较有效）。即：
   * `ablation_core_items.txt` = 3 个提示条件 × 256 条 = 768 条；
-  * `ablation_detection_items.txt` = 256 个音频 × 全部 6 个检测任务 = 1536 条
-    （保证检测 main 与 typed 子集都可算）；
   * `ablation_pairs_items.txt` = 按 pair_type 抽取实例（每类 ≤256 实例，i/ü 80、ian/üan 48 全取），
-    每个被选中实例的全部提示条件任务保留。
+    每个被选中实例的 3 个子实验任务全部保留；
+  * v3 **不生成** `ablation_detection_items.txt`（检测实验不参与消融）。
 * 噪声音频缓存到 `data/noisy/{audio_id}__snr20db.wav`（16-bit PCM WAV，确定性种子）。
 
 ### 4.2 生成记录 GenerationRecord
@@ -208,7 +207,7 @@ output_form     ∈ {"json", "text"}
 
 * `parse_status`：`ok | parse_error | refused | empty | api_error`；
   仅 `ok` 进入指标分子分母，其余计入 `n_parse_failures` 并单独汇报比例。
-* `pred_*` 为**规范化后**的值（initial 小写；final 用 `ü`；tone 为 int；choice 为 `A/B`）。
+* `pred_*` 为**规范化后**的值（initial 小写；final 用 `ü`；tone 为 int；v3 无 choice）。
 * 检测分析时再派生行：`detection_role ∈ {neg,pos}`，`detection_subset ∈ {main,initial,final,tone}`。
 
 ## 5. 最小对构造 minimal_pairs.py
@@ -317,9 +316,9 @@ def paired_outcomes(rows_a, rows_b, *, item_key="item_id", correctness_key="is_c
 `run_manifest.json`（含 config 快照、模型 id、调用日期、数据 commit、prompt 版本、
 mapping sha256），输出 `report.md`、`metrics.csv`、`detection.csv`、`ablation.csv`、
 `comparisons.csv`、`baselines.csv`、`confusion/*.csv`、`summary.json`；
-报告对应 2026-10-28 设计矩阵：实验一/二只报 Tone；检测实验报 EP/ER/F1/FPR/FNR；
-实验三/四/五/六与 A/B 不变；另含 95% bootstrap CI、基线、混淆矩阵、解析失败率、
-McNemar + Holm/BH。
+报告对应 2026-10-28 v3 设计：实验一/二只报 Tone；检测实验报 EP/ER/F1/FPR/FNR；
+实验四/五/六报 3 个子实验下的 initial/final/tone 准确率；无 A/B；消融只含 core+pairs；
+另含 95% bootstrap CI、基线、混淆矩阵、解析失败率、成本与用量、McNemar + Holm/BH。
 
 ## 9. 测试与验收
 
@@ -339,3 +338,42 @@ McNemar + Holm/BH。
 | data-dev | `src/pinyin_eval/data/minimal_pairs.py`, `tests/test_minimal_pairs.py` |
 
 禁止改动他人文件；发现契约问题先在共享任务/消息中提出，由 Lead 更新本文件。
+
+## 11. 计费、成本与预算（v3 新增）
+
+```python
+@dataclass(frozen=True)
+class Pricing:  # pinyin_eval.pricing
+    input_per_mtok: float = 0.8          # CNY / 1M tokens
+    cache_hit_input_per_mtok: float = 0.1
+    output_per_mtok: float = 2.7
+    audio_tokens_per_second: float = 7   # Qwen3.8-Omni: ceil(duration_s) * 7
+    ...
+    @classmethod
+    def from_config(cls, cfg: Config | None = None) -> Pricing
+    def audio_tokens(self, duration_s: float | None) -> int
+    def call_cost(self, prompt_tokens: int, completion_tokens: int, cached_tokens: int = 0) -> dict
+```
+
+* 实际成本：`(prompt_tokens - cached_tokens)*input_per_mtok/1e6
+  + cached_tokens*cache_hit_input_per_mtok/1e6 + completion_tokens*output_per_mtok/1e6`；
+  `pinyin_eval cost --run-id` 从 `generations.jsonl` 的 usage 汇总。
+* 预估：`runner.estimate_plan_cost(cfg, plans)` 返回 expected / conservative / worst-case
+  三档；worst-case 假设每次输出打满 `model.max_output_tokens`。
+* 预算 guard：`generation.budget_cny` 或 `generate --max-cost`；达到预算后停止新请求，
+  manifest `status="budget_exceeded"`、`counts.n_skipped_budget>0`，可用同一 run-id 续跑。
+* manifest 新增字段：`pricing`、`budget_cny`、`counts.{n_calls,cost_cny,input_tokens,
+  output_tokens,reasoning_tokens,budget}`；report 输出 `usage.csv` + 成本节。
+
+## 12. 最小化实验设计（¥70 预算，v3 新增）
+
+* 文档：`docs/experiment-design-minimal.md`；配置：`configs/minimal.yaml`（`extends: configs/base.yaml`）。
+* `build-tasks --minimal` 产出：
+  `minimal_items.txt`（C1 全部任务）、`minimal_no_detection_items.txt`（C2–C4 不含检测）、
+  `minimal_{core,detection,pair}_items.txt`、`minimal_summary.json`。
+* 生成时 `--profile minimal --conditions minimal`：C1 含检测实验，C2–C4 自动排除检测
+  （runner `item_subset_by_generation`）；`budget_cny=70` 生效。
+* 默认档位：`minimal.n_targets=96`、`minimal.pair_instances_per_type=48` →
+  59,968 requests，expected ¥18.9 / conservative ¥21.3 / worst-case ¥50.1。
+* 估算命令：`pinyin-eval --config configs/minimal.yaml estimate --tasks all --profile minimal
+  --conditions minimal`。

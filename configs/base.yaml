@@ -80,6 +80,32 @@ generation:
   noise_snr_db: 20
   # 单次请求输出上限（与 model.max_output_tokens 对齐）
   max_output_tokens: 256
+  # 成本预算（CNY）；达到后 runner 停止发起新请求（已发出的请求仍会完成并记账）
+  # 全量/消融设计为 null（不设预算）；最小化设计在 configs/minimal.yaml 中设为 70
+  budget_cny: null
+
+# ---------------------------------------------------------------------------
+# 计费参数（阿里云百炼 qwen3.8-omni-flash 华北2/北京，2026-10-28 价格快照）
+# 来源: https://help.aliyun.com/zh/model-studio/model-pricing
+#       https://help.aliyun.com/zh/model-studio/qwen-omni （音频 token 规则）
+# ---------------------------------------------------------------------------
+pricing:
+  currency: CNY
+  # 元 / 百万 token
+  input_per_mtok: 0.8
+  cache_hit_input_per_mtok: 0.1
+  output_per_mtok: 2.7
+  # Qwen3.8-Omni-Flash 输入音频: 总 tokens = 音频时长(秒) * 7，不足 1 秒按 1 秒
+  audio_tokens_per_second: 7
+  audio_min_seconds: 1
+  # 成本预估用（真实成本以 API 返回 usage 为准）：
+  # 中文 prompt 字符数 -> token 数的保守/期望换算（1.0 = 每字符 1 token，偏保守）
+  prompt_tokens_per_char_conservative: 1.0
+  prompt_tokens_per_char_expected: 0.7
+  # 输出 token 假设（用于 estimate 预算预估；真实值以 usage 为准）
+  assumed_output_tokens_off: 30
+  assumed_output_tokens_on: 300
+  assumed_output_tokens_on_high: 800
 
 tasks:
   # 实验二（2026-10-28 设计更新）：5 个错误无调拼音，只改声母或韵母，不含改声调。

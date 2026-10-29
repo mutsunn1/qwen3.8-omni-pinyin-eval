@@ -65,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("build-tasks", help="build task catalogs, detection sets and ablation subsets")
     p.add_argument("--skip-pairs", action="store_true", help="only build experiments 1-3 tasks")
     p.add_argument("--validate", action="store_true", help="validate minimal-pair counts against the design doc")
+    p.add_argument("--minimal", action="store_true",
+                   help="also build the fixed task subset for the minimal (¥70) design")
     p.add_argument("--include-wide-nasal", action="store_true",
                    help="also pair ian/iang and uan/uang (52 pairs; the design doc table counts 40)")
     p.set_defaults(func=cmd_build_tasks)
@@ -77,19 +79,20 @@ def build_parser() -> argparse.ArgumentParser:
     # estimate -----------------------------------------------------------
     p = sub.add_parser("estimate", help="count API calls / audio seconds for a run plan")
     p.add_argument("--tasks", default="all", choices=["core", "pairs", "detect", "all"])
-    p.add_argument("--profile", default="main", choices=["main", "ablation", "all"])
-    p.add_argument("--conditions", default="main", choices=["main", "all"])
+    p.add_argument("--profile", default="main", choices=["main", "ablation", "minimal", "all"])
+    p.add_argument("--conditions", default="main", choices=["main", "all", "minimal"])
+    p.add_argument("--item-ids", default=None, help="explicit item-id list file")
     p.add_argument("--condition", action="append", default=None, metavar="THINK:QUALITY:FORM")
     p.set_defaults(func=cmd_estimate)
 
     # generate -----------------------------------------------------------
     p = sub.add_parser("generate", help="run model generations with resume support")
     p.add_argument("--tasks", default="all", choices=["core", "pairs", "detect", "all"])
-    p.add_argument("--profile", default="main", choices=["main", "ablation"],
-                   help="main = full task catalog; ablation = fixed 256-item subsets")
+    p.add_argument("--profile", default="main", choices=["main", "ablation", "minimal"],
+                   help="main = full task catalog; ablation = 256-item subsets; minimal = ¥70 subset")
     p.add_argument("--item-ids", default=None, help="explicit item-id list file (overrides --profile)")
-    p.add_argument("--conditions", default="main", choices=["main", "all"],
-                   help="main = config main_condition; all = 2x2x2 factorial grid")
+    p.add_argument("--conditions", default="main", choices=["main", "all", "minimal"],
+                   help="main = config main_condition; all = 2x2x2 grid; minimal = config minimal.conditions")
     p.add_argument("--condition", action="append", default=None,
                    metavar="THINK:QUALITY:FORM",
                    help="extra/override generation condition, e.g. think0:clean:json")
@@ -100,12 +103,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="write the request plan, do not call the API")
     p.add_argument("--mock", action="store_true", help="use the deterministic mock client")
     p.add_argument("--no-resume", action="store_true", help="ignore existing generations of the same run id")
+    p.add_argument("--max-cost", type=float, default=None,
+                   help="hard CNY budget: stop issuing new API calls when reached")
     p.set_defaults(func=cmd_generate)
 
     # score --------------------------------------------------------------
     p = sub.add_parser("score", help="parse generations into item results and detection rows")
     p.add_argument("--run-id", required=True)
     p.set_defaults(func=cmd_score)
+
+    # cost ---------------------------------------------------------------
+    p = sub.add_parser("cost", help="compute actual token usage and CNY cost of a run")
+    p.add_argument("--run-id", required=True)
+    p.set_defaults(func=cmd_cost)
 
     # report -------------------------------------------------------------
     p = sub.add_parser("report", help="write the markdown report and metric tables")
@@ -195,10 +205,44 @@ def _task_sources(cfg: Config, which: str) -> list[str]:
     return sources
 
 
+def _load_minimal_subsets(cfg: Config, task_ids: set[str]) -> tuple[set[str], dict[str, set[str]]]:
+    """Load the minimal design item subsets (v3: detection only under main)."""
+    from .tasks import load_item_ids
+
+    tdir = _task_dir(cfg)
+    all_path = tdir / "minimal_items.txt"
+    nodet_path = tdir / "minimal_no_detection_items.txt"
+    if not all_path.exists() or not nodet_path.exists():
+        raise SystemExit(
+            f"minimal subsets missing ({all_path.name}/{nodet_path.name}); run "
+            "`pinyin-eval --config configs/minimal.yaml build-tasks --minimal`"
+        )
+    all_ids = set(load_item_ids(all_path)) & task_ids
+    nodet_ids = set(load_item_ids(nodet_path)) & task_ids
+    by_generation: dict[str, set[str]] = {}
+    for cond in cfg.get("minimal.conditions") or []:
+        role = str(cond.get("role", ""))
+        key = (
+            f"{'think1' if cond['thinking'] else 'think0'}"
+            f"__{cond['audio_quality']}__{cond['output_form']}"
+        )
+        by_generation[key] = all_ids if role == "main" else nodet_ids
+    return all_ids, by_generation
+
+
 def _conditions_from_args(cfg: Config, args: argparse.Namespace) -> list[dict[str, Any]]:
     conditions: list[dict[str, Any]] = []
     if args.conditions == "all":
         conditions.extend(cfg.all_conditions())
+    elif args.conditions == "minimal":
+        for cond in cfg.get("minimal.conditions") or []:
+            conditions.append({
+                "thinking": bool(cond["thinking"]),
+                "audio_quality": str(cond["audio_quality"]),
+                "output_form": str(cond["output_form"]),
+            })
+        if not conditions:
+            raise SystemExit("config has no minimal.conditions (use configs/minimal.yaml)")
     else:
         conditions.append(cfg.main_condition)
     for spec in getattr(args, "condition", None) or []:
@@ -226,7 +270,15 @@ def _load_item_subset(cfg: Config, args: argparse.Namespace, tasks: Sequence[Any
         path = Path(args.item_ids)
         ids = set(load_item_ids(path))
         return ids, str(path)
-    if getattr(args, "profile", "main") != "ablation":
+    profile = getattr(args, "profile", "main")
+    if profile == "minimal":
+        path = _task_dir(cfg) / "minimal_items.txt"
+        if not path.exists():
+            raise SystemExit(
+                f"{path} missing; run `pinyin-eval --config configs/minimal.yaml build-tasks --minimal`"
+            )
+        return set(load_item_ids(path)), _repo_relative(cfg, path)
+    if profile != "ablation":
         return None, None
     task_ids = {t.item_id for t in tasks}
     selected: set[str] = set()
@@ -321,14 +373,28 @@ def cmd_build_tasks(args: argparse.Namespace) -> int:
 
     selection = sample_ablation(cfg, core, pairs, detect, detection_sets=detection)
     write_item_ids(selection["core"], tdir / "ablation_core_items.txt")
-    write_item_ids(selection["detect"], tdir / "ablation_detection_items.txt")
     if pairs:
         write_item_ids(selection["pairs"], tdir / "ablation_pairs_items.txt")
         print("ablation pair instances:", json.dumps(selection["pair_instance_summary"], ensure_ascii=False))
-    print(
-        f"ablation items: core={len(selection['core'])} "
-        f"detect={len(selection['detect'])} pairs={len(selection['pairs'])}"
-    )
+    print(f"ablation items: core={len(selection['core'])} pairs={len(selection['pairs'])}")
+    print("v3 ablation: detection experiment does not participate in the ablation grid")
+
+    if getattr(args, "minimal", False):
+        from .tasks import build_minimal_subset
+
+        minimal = build_minimal_subset(cfg, core, detect, pairs, records)
+        write_item_ids(minimal["core_item_ids"], tdir / "minimal_core_items.txt")
+        write_item_ids(minimal["detection_item_ids"], tdir / "minimal_detection_items.txt")
+        write_item_ids(minimal["pair_item_ids"], tdir / "minimal_pair_items.txt")
+        write_item_ids(minimal["all_item_ids"], tdir / "minimal_items.txt")
+        write_item_ids(minimal["no_detection_item_ids"],
+                       tdir / "minimal_no_detection_items.txt")
+        with (tdir / "minimal_summary.json").open("w", encoding="utf-8") as fh:
+            json.dump(minimal, fh, ensure_ascii=False, indent=2)
+        print("minimal subset:", json.dumps(minimal["summary"], ensure_ascii=False, indent=1))
+        print("minimal files: minimal_items.txt / minimal_no_detection_items.txt / "
+              "minimal_core_items.txt / minimal_detection_items.txt / "
+              "minimal_pair_items.txt / minimal_summary.json")
     print("task dir:", tdir)
     return 0
 
@@ -358,28 +424,38 @@ def cmd_validate_pairs(args: argparse.Namespace) -> int:
 
 
 def cmd_estimate(args: argparse.Namespace) -> int:
-    from .tasks import count_unique_requests, load_item_ids
+    from .runner import (
+        build_request_plan,
+        estimate_plan_cost,
+        filter_plans_by_generation,
+        plan_summary,
+    )
 
     cfg = load_config(args)
     tasks = _load_task_lists(cfg, args.tasks)
     conditions = _conditions_from_args(cfg, args)
-    subset: set[str] | None = None
-    if args.profile == "ablation":
-        subset = set()
-        for name in ("ablation_core_items.txt", "ablation_detection_items.txt",
-                     "ablation_pairs_items.txt"):
-            path = _task_dir(cfg) / name
-            if path.exists():
-                subset.update(load_item_ids(path))
-    est = count_unique_requests(tasks, cfg, conditions=conditions, item_subset=subset)
-    n_tasks = len(tasks) if subset is None else len(subset & {t.item_id for t in tasks})
-    print(json.dumps({
+    subset, subset_source = _load_item_subset(cfg, args, tasks)
+    gen_subsets = None
+    if getattr(args, "profile", "main") == "minimal":
+        subset, gen_subsets = _load_minimal_subsets(cfg, {t.item_id for t in tasks})
+        tdir = _task_dir(cfg)
+        subset_source = ",".join(
+            _repo_relative(cfg, tdir / name)
+            for name in ("minimal_items.txt", "minimal_no_detection_items.txt")
+        )
+    plans = build_request_plan(cfg, tasks, conditions, item_subset=subset)
+    plans = filter_plans_by_generation(plans, gen_subsets)
+    summary = plan_summary(plans)
+    cost = estimate_plan_cost(cfg, plans)
+    payload = {
         "tasks": args.tasks,
         "profile": args.profile,
-        "n_task_items": n_tasks,
+        "item_subset_source": subset_source,
         "conditions": conditions,
-        **est,
-    }, ensure_ascii=False, indent=2))
+        **summary,
+        "cost_estimate": cost,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -390,6 +466,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
     tasks = _load_task_lists(cfg, args.tasks)
     conditions = _conditions_from_args(cfg, args)
     subset, subset_source = _load_item_subset(cfg, args, tasks)
+    gen_subsets = None
+    if getattr(args, "profile", "main") == "minimal":
+        subset, gen_subsets = _load_minimal_subsets(cfg, {t.item_id for t in tasks})
+        tdir = _task_dir(cfg)
+        subset_source = ",".join(
+            _repo_relative(cfg, tdir / name)
+            for name in ("minimal_items.txt", "minimal_no_detection_items.txt")
+        )
     task_sources = _task_sources(cfg, args.tasks)
     result = run_generation(
         cfg,
@@ -403,6 +487,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         mock=args.mock,
         task_sources=task_sources,
+        max_cost_cny=args.max_cost,
+        item_subset_by_generation=gen_subsets,
         extra_manifest={"cli": {"tasks": args.tasks, "profile": args.profile,
                                 "conditions_arg": args.conditions}},
     )
@@ -416,6 +502,31 @@ def cmd_score(args: argparse.Namespace) -> int:
     cfg = load_config(args)
     out = score_run(cfg, args.run_id)
     print(json.dumps(out["summary"], ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_cost(args: argparse.Namespace) -> int:
+    from .pricing import Pricing, budget_status, summarize_generations
+    from .runner import load_generations, read_manifest
+
+    cfg = load_config(args)
+    run_dir = cfg.path("paths.results_dir") / "runs" / args.run_id
+    if not run_dir.exists():
+        raise SystemExit(f"run not found: {run_dir}")
+    manifest = read_manifest(run_dir)
+    pricing = Pricing.from_config(cfg)
+    summary = summarize_generations(load_generations(run_dir), pricing)
+    budget = budget_status(summary["overall"]["cost_cny"], manifest.get("budget_cny"))
+    payload = {
+        "run_id": manifest.get("run_id"),
+        "status": manifest.get("status"),
+        "budget": budget,
+        "overall": summary["overall"],
+        "by_condition": summary["by_condition"],
+        "by_generation": summary["by_generation"],
+        "pricing": summary["pricing"],
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -503,8 +614,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     tdir = _task_dir(cfg)
     counts: dict[str, Any] = {}
     for name in ("core.jsonl", "pairs.jsonl", "detection.jsonl", "detection_sets.csv",
-                 "ablation_core_items.txt", "ablation_detection_items.txt",
-                 "ablation_pairs_items.txt"):
+                 "ablation_core_items.txt", "ablation_pairs_items.txt",
+                 "minimal_items.txt", "minimal_no_detection_items.txt",
+                 "minimal_summary.json"):
         path = tdir / name
         counts[name] = path.stat().st_size if path.exists() else None
     report["tasks"] = counts

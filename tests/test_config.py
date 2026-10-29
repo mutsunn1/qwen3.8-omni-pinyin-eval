@@ -14,7 +14,7 @@ from pinyin_eval.config import (
     load_dotenv,
 )
 
-from .conftest import CONFIG_PATH
+from .conftest import CONFIG_PATH, REPO_ROOT
 
 
 def test_load_dotenv_parses_key_values(tmp_path):
@@ -75,6 +75,32 @@ def test_config_load_uses_dotenv(monkeypatch, tmp_path):
             os.environ.pop("DASHSCOPE_API_KEY", None)
         else:
             os.environ["DASHSCOPE_API_KEY"] = old_key
+
+
+def test_config_extends_minimal_design():
+    base = Config.load(REPO_ROOT / "configs" / "base.yaml", repo_root=REPO_ROOT)
+    mini = Config.load(REPO_ROOT / "configs" / "minimal.yaml", repo_root=REPO_ROOT)
+    # inherited
+    assert mini.model_name == base.model_name
+    assert mini.path("paths.mapping_csv") == base.path("paths.mapping_csv")
+    # overridden
+    assert mini.get("generation.budget_cny") == 70
+    assert mini.main_condition == {
+        "thinking": False, "audio_quality": "clean", "output_form": "json",
+    }
+    conditions = mini.get("minimal.conditions")
+    assert len(conditions) == 4
+    assert {c["role"] for c in conditions} == {
+        "main", "thinking_ablation", "noise_ablation", "output_ablation",
+    }
+    assert mini.get("pricing.input_per_mtok") == 0.8
+
+
+def test_config_extends_missing_parent_raises(tmp_path):
+    child = tmp_path / "child.yaml"
+    child.write_text("extends: missing.yaml\nproject:\n  name: x\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="parent config not found"):
+        Config.load(child, repo_root=tmp_path)
 
 
 def test_config_missing_required_key(tmp_path):

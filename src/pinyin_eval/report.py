@@ -24,7 +24,10 @@ Analysis protocol implemented here (mirrors the design document):
   McNemar tests plus paired cluster-bootstrap CIs, with Holm correction inside
   each metric family;
 * confusion matrices are written for the main condition's free-recognition view
-  (experiment 3) per dimension (and per voice when configured).
+  (experiment 3) per dimension (and per voice when configured);
+* token usage / CNY cost is summarised from ``generations.jsonl`` with the
+  manifest ``pricing`` snapshot (input / cache-hit / output rates) and compared
+  against the manifest ``budget_cny`` guard when present.
 
 All numbers written to CSV/JSON are plain Python scalars (``NaN`` -> ``None``)
 and the module does no network / model calls: it only reads scored files.
@@ -51,7 +54,8 @@ import pandas as pd
 
 from . import metrics, stats
 from .config import Config
-from .records import EXPERIMENT_METRIC_DIMENSION, EXPERIMENTS, PROMPT_CONDITION_TITLES
+from .pricing import DEFAULT_PRICING, Pricing, budget_status, summarize_generations
+from .records import EXPERIMENTS, PROMPT_CONDITION_TITLES
 from .scoring import attach_correctness, generation_key
 
 log = logging.getLogger(__name__)
@@ -64,11 +68,11 @@ __all__ = ["ReportError", "write_report"]
 
 ITEMS_NAME = "items.parquet"
 DETECTION_ROWS_NAME = "detection_rows.parquet"
+GENERATIONS_NAME = "generations.jsonl"
 MANIFEST_NAME = "run_manifest.json"
 AUDIO_MANIFEST_NAME = "audio.parquet"
 TASK_DIR = "tasks"
 ABLATION_CORE_NAME = "ablation_core_items.txt"
-ABLATION_DETECTION_NAME = "ablation_detection_items.txt"
 ABLATION_PAIRS_NAME = "ablation_pairs_items.txt"
 MINIMAL_PAIR_COUNTS_NAME = "minimal_pair_counts.json"
 
@@ -78,6 +82,7 @@ DETECTION_NAME = "detection.csv"
 ABLATION_NAME = "ablation.csv"
 COMPARISONS_NAME = "comparisons.csv"
 BASELINES_NAME = "baselines.csv"
+USAGE_NAME = "usage.csv"
 SUMMARY_NAME = "summary.json"
 CONFUSION_DIR = "confusion"
 
@@ -135,9 +140,6 @@ ABLATION_COLUMNS: tuple[str, ...] = (
     "value",
     "n",
     "n_failures",
-    "n_neg",
-    "n_pos",
-    "is_balanced",
 )
 
 #: paired condition comparisons written to ``comparisons.csv``
@@ -159,6 +161,23 @@ COMPARISON_COLUMNS: tuple[str, ...] = (
     "p",
     "p_holm",
     "method",
+)
+
+#: per-run / per-condition token & cost table written to ``usage.csv``
+USAGE_COLUMNS: tuple[str, ...] = (
+    "scope",
+    "condition_id",
+    "generation_condition",
+    "n_calls",
+    "n_errors",
+    "prompt_tokens",
+    "cached_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "input_cost_cny",
+    "output_cost_cny",
+    "total_cost_cny",
+    "avg_latency_s",
 )
 
 #: baseline table written to ``baselines.csv``
@@ -199,7 +218,6 @@ DIMENSION_TITLES: dict[str, str] = {
     "final": "韵母",
     "tone": "声调",
     "joint": "联合",
-    "ab": "A/B",
     "consistency": "一致性判定",
     "detection": "检测",
 }
@@ -229,25 +247,33 @@ DETECTION_METRICS: tuple[str, ...] = (
 
 #: per-cell descriptor for the main-results section
 #: (experiment, prompt_condition, mode, dimensions, include_joint)
+#:
+#: v3 design: experiments 1/2 are tone-only, experiment 3 is free recognition and
+#: experiments 4/5/6 each have **three sub-experiments** (free / correct info /
+#: wrong info) that only report their own dimension.  There is no A/B task.
 MAIN_CELL_DEFS: tuple[tuple[str, str, str, tuple[str, ...], bool], ...] = (
     ("exp1", "correct_target", "recognition", ("tone",), False),
     ("exp2", "wrong_target", "recognition", ("tone",), False),
     ("exp3", "free", "recognition", ("initial", "final", "tone"), True),
     ("exp4", "free", "recognition", ("initial",), False),
-    ("exp4", "ab_choice", "ab", (), False),
+    ("exp4", "correct_target", "recognition", ("initial",), False),
+    ("exp4", "wrong_target", "recognition", ("initial",), False),
     ("exp5", "free", "recognition", ("final",), False),
-    ("exp5", "ab_choice", "ab", (), False),
+    ("exp5", "correct_target", "recognition", ("final",), False),
+    ("exp5", "wrong_target", "recognition", ("final",), False),
     ("exp6", "free", "recognition", ("tone",), False),
-    ("exp6", "ab_choice", "ab", (), False),
+    ("exp6", "correct_target", "recognition", ("tone",), False),
+    ("exp6", "wrong_target", "recognition", ("tone",), False),
 )
 
-#: comparison metric families: (experiment/family, metric name, dimension, prompt c.)
+#: comparison metric families: (family label, metric name, dimension, prompt c.)
 #:
-#: 2026-10-28 design update:
-#: * experiments 1/2 only measure tone (no consistency judgement any more);
-#: * the dedicated ``detect`` experiment carries the consistency metric;
-#: * experiment 6 has no ``wrong_target`` prompt condition (tone pairs share the
-#:   same toneless target, so a wrong toneless claim cannot be expressed).
+#: v3 (2026-10-28 20:37) design:
+#: * experiments 1/2 only measure tone; the dedicated ``detect`` experiment
+#:   carries the consistency metric;
+#: * experiments 4/5/6 are three sub-experiments each (free / correct / wrong)
+#:   and only report their own dimension -> three comparison families each;
+#: * there is no A/B task and no exp6 ``wrong_target`` tone-only family.
 COMPARISON_SPECS: tuple[tuple[str, str, str, str], ...] = (
     ("exp1", "tone_accuracy", "tone", "correct_target"),
     ("exp2", "tone_accuracy", "tone", "wrong_target"),
@@ -256,33 +282,37 @@ COMPARISON_SPECS: tuple[tuple[str, str, str, str], ...] = (
     ("exp3", "tone_accuracy", "tone", "free"),
     ("exp3", "joint_accuracy", "joint", "free"),
     ("detect", "consistency_accuracy", "consistency", "detect"),
-    ("exp4", "initial_accuracy", "initial", "free"),
-    ("exp4", "ab_accuracy", "ab", "ab_choice"),
-    ("exp5", "final_accuracy", "final", "free"),
-    ("exp5", "ab_accuracy", "ab", "ab_choice"),
-    ("exp6", "tone_accuracy", "tone", "free"),
-    ("exp6", "ab_accuracy", "ab", "ab_choice"),
+    ("exp4.free", "initial_accuracy", "initial", "free"),
+    ("exp4.correct_target", "initial_accuracy", "initial", "correct_target"),
+    ("exp4.wrong_target", "initial_accuracy", "initial", "wrong_target"),
+    ("exp5.free", "final_accuracy", "final", "free"),
+    ("exp5.correct_target", "final_accuracy", "final", "correct_target"),
+    ("exp5.wrong_target", "final_accuracy", "final", "wrong_target"),
+    ("exp6.free", "tone_accuracy", "tone", "free"),
+    ("exp6.correct_target", "tone_accuracy", "tone", "correct_target"),
+    ("exp6.wrong_target", "tone_accuracy", "tone", "wrong_target"),
 )
 
-#: design "实验 × 指标矩阵" (2026-10-28 update); used by the markdown overview table.
+#: design "实验 × 指标矩阵" (v3); used by the markdown overview table.
 #: Each row: (experiment, title, Initial, Final, Tone, Joint, EP/ER/F1, FPR/FNR).
 EXPERIMENT_METRIC_MATRIX: tuple[tuple[str, ...], ...] = (
-    ("exp1", "实验一（正确目标，只评声调）", "—", "—", "✓", "—", "—", "—"),
-    ("exp2", "实验二（错误无调目标，只评声调）", "—", "—", "✓", "—", "—", "—"),
+    ("exp1", "实验一（正确信息，只评声调）", "—", "—", "✓", "—", "—", "—"),
+    ("exp2", "实验二（错误信息，只评声调）", "—", "—", "✓", "—", "—", "—"),
     ("detect", "检测实验（target + target_tone）", "—", "—", "—", "—", "✓", "✓"),
-    ("exp3", "实验三（无参考自由识别）", "✓", "✓", "✓", "✓", "—", "—"),
-    ("exp4", "实验四（声母最小对）", "✓", "—", "—", "—", "—", "—"),
-    ("exp5", "实验五（韵母最小对）", "—", "✓", "—", "—", "—", "—"),
-    ("exp6", "实验六（声调最小对）", "—", "—", "✓", "—", "—", "—"),
+    ("exp3", "实验三（自由检测/识别）", "✓", "✓", "✓", "✓", "—", "—"),
+    ("exp4", "实验四（声母最小对；free/正确/错误 3 子实验）", "✓", "—", "—", "—", "—", "—"),
+    ("exp5", "实验五（韵母最小对；free/正确/错误 3 子实验）", "—", "✓", "—", "—", "—", "—"),
+    ("exp6", "实验六（声调最小对；free/正确/错误 3 子实验）", "—", "—", "✓", "—", "—", "—"),
 )
 
 #: note recorded in the report header / appendix: data & task schema revision
 DESIGN_REVISION_NOTE = (
-    "数据/任务结构对应 2026-10-28 设计更新：实验一/二只评声调（共用无调目标 tone prompt，"
-    "不再做一致性判定）；检测实验独立（target + target_tone → {\"consistent\"}，2 改声母 / "
-    "2 改韵母 / 1 改声调）；实验四~六的检测信号来自 A/B prompt。检测实验中**正类 = 不一致**，"
-    "`pred_consistent=True` 表示模型判定“一致”；实验二为 5 个只改声母/韵母的错误无调目标"
-    "（不含改声调）；实验六没有 wrong-target 提示条件（声调对两侧无调 target 相同）。"
+    "数据/任务结构对应 2026-10-28 v3 设计更新：取消 A/B 辨别任务；提示条件统一为三水平"
+    "（自由检测 / 正确信息 / 错误信息）；实验一/二只评声调；检测实验独立"
+    "（target + target_tone → {\"consistent\"}，2 改声母 / 2 改韵母 / 1 改声调）且**不参与消融**；"
+    "实验四/五/六各为三个子实验（自由检测 / 正确信息 / 错误信息），分别只输出并评估"
+    " initial / final / tone。检测实验中**正类 = 不一致**，`pred_consistent=True` 表示模型"
+    "判定“一致”；实验二为 5 个只改声母/韵母的错误无调目标。"
 )
 
 DEFAULT_MAIN_CONDITION: dict[str, Any] = {
@@ -339,6 +369,50 @@ def _int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _as_int_or_none(value: Any) -> int | None:
+    """``int`` conversion that keeps missing values as ``None``."""
+    if _is_missing(value):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float_or_none(value: Any) -> float | None:
+    """``float`` conversion that keeps missing values as ``None``."""
+    if _is_missing(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _round4(value: Any) -> float | None:
+    """Round a CNY amount / latency to 4 decimals (``None`` stays ``None``)."""
+    number = _as_float_or_none(value)
+    return None if number is None else round(number, 4)
+
+
+def _fmt_count(value: Any) -> str:
+    """Format a token/call counter with thousands separators."""
+    number = _as_int_or_none(value)
+    return "—" if number is None else f"{number:,}"
+
+
+def _pricing_from_mapping(raw: Mapping[str, Any]) -> Pricing | None:
+    """Build a :class:`~pinyin_eval.pricing.Pricing` from a manifest snapshot."""
+    values = dict(DEFAULT_PRICING)
+    for key in values:
+        if key in raw and raw[key] is not None:
+            values[key] = raw[key]
+    try:
+        return Pricing(**values)
+    except (TypeError, ValueError):
+        return None
 
 
 def _ratio(numerator: float, denominator: float) -> float | None:
@@ -520,7 +594,6 @@ _IG, _IP = "_ig", "_ip"
 _FG, _FP = "_fg", "_fp"
 _TG, _TP = "_tg", "_tp"
 _JOINT, _OK = "_joint", "_ok"
-_AB_OK, _AB_C = "_abok", "_abc"
 _DET_CODE = "_dcode"
 
 
@@ -579,16 +652,6 @@ def _make_recognition_fn(
         return out
 
     return metric_fn
-
-
-def _ab_metric_fn(rows: Sequence[Mapping[str, Any]]) -> dict[str, float | None]:
-    n = len(rows)
-    if n == 0:
-        return {"accuracy": None}
-    parsed = np.fromiter(map(operator.itemgetter(_AB_OK), rows), np.int64, n)
-    correct = np.fromiter(map(operator.itemgetter(_AB_C), rows), np.int64, n)
-    denominator = int(parsed.sum())
-    return {"accuracy": float(correct.sum() / denominator) if denominator else None}
 
 
 def _detection_metric_fn(rows: Sequence[Mapping[str, Any]]) -> dict[str, float | None]:
@@ -700,6 +763,10 @@ class _Reporter:
         self.detection_rows: list[dict[str, Any]] = []
         self.ablation_rows: list[dict[str, Any]] = []
         self.comparison_rows: list[dict[str, Any]] = []
+        self.usage_rows: list[dict[str, Any]] = []
+        self.usage_summary: dict[str, Any] = {}
+        self.cost_summary: dict[str, Any] = {}
+        self._usage_notes: list[str] = []
         self.baseline_rows: list[dict[str, Any]] = []
         self.headline: dict[str, Any] = {}
         self.detection_headline: dict[str, Any] = {}
@@ -858,7 +925,6 @@ class _Reporter:
                 "correct_target": "tone",
                 "wrong_target": "tone",
                 "detect": "detect",
-                "ab_choice": "ab",
             }
         ).fillna("")
         if "task_type" not in frame.columns:
@@ -941,14 +1007,14 @@ class _Reporter:
             self._warn("items.parquet 中没有可识别的 generation condition；无法计算主结果")
         main_frame = self.items[self.items["generation_condition"] == self.main_key]
         # the dedicated detect experiment is analysed from detection_rows.parquet in
-        # the detection section; the recognition / A/B analysis below only uses the
-        # free, tone and ab output schemas.
+        # the detection section; the recognition analysis below uses the v3 three
+        # prompt conditions (free / correct info / wrong info) of experiments 1-6.
         analysis_mask = (
             main_frame["experiment"].isin(["exp1", "exp2", "exp3"])
             & main_frame["prompt_condition"].isin(["free", "correct_target", "wrong_target"])
         ) | (
             main_frame["experiment"].isin(["exp4", "exp5", "exp6"])
-            & main_frame["prompt_condition"].isin(["free", "ab_choice"])
+            & main_frame["prompt_condition"].isin(["free", "correct_target", "wrong_target"])
         )
         main_frame = main_frame[analysis_mask]
         self.mainrows, self.label_sizes = self._encode_items(main_frame)
@@ -972,8 +1038,6 @@ class _Reporter:
         gold = {dim: frame[f"gold_{dim}"].tolist() for dim in RECOGNITION_DIMS}
         pred = {dim: frame[f"pred_{dim}"].tolist() for dim in RECOGNITION_DIMS}
         joint = _joint_mask(frame).tolist()
-        choice_correct = _eq_mask(frame["correct_choice"], frame["pred_choice"]).tolist()
-        choice_ok = parsed
         for index, row in enumerate(rows):
             ok = bool(parsed[index])
             row[_OK] = 1 if ok else 0
@@ -985,8 +1049,6 @@ class _Reporter:
                     row[f"_{dim[0]}p"] = encode(dim, pred_value)
                 else:
                     row[f"_{dim[0]}p"] = -1
-            row[_AB_OK] = 1 if choice_ok[index] else 0
-            row[_AB_C] = 1 if choice_correct[index] else 0
         label_sizes = {dim: len(mapping) for dim, mapping in label_maps.items()}
         return rows, label_sizes
 
@@ -1130,36 +1192,6 @@ class _Reporter:
                 )
             )
 
-    def _append_ab_cell(
-        self,
-        rows: Sequence[Mapping[str, Any]],
-        *,
-        scope: str,
-        experiment: str,
-        prompt_condition: str,
-        condition_id: str,
-        generation_condition: str,
-        voice: str = "",
-    ) -> None:
-        values = metrics.ab_metrics(rows)
-        uncertainty = self._bootstrap(rows, _ab_metric_fn)
-        self.metrics_rows.append(
-            self._metric_row(
-                scope=scope,
-                experiment=experiment,
-                prompt_condition=prompt_condition,
-                condition_id=condition_id,
-                generation_condition=generation_condition,
-                voice=voice,
-                dimension="ab",
-                metric="accuracy",
-                value=values.get("accuracy"),
-                ci=uncertainty.get("accuracy"),
-                n=_int(values.get("n")),
-                n_failures=_int(values.get("n_failures")),
-            )
-        )
-
     def _append_ablation_metric(
         self,
         *,
@@ -1175,9 +1207,6 @@ class _Reporter:
         value: Any,
         n: int,
         n_failures: int,
-        n_neg: int | None = None,
-        n_pos: int | None = None,
-        is_balanced: bool | None = None,
     ) -> None:
         self.ablation_rows.append(
             {
@@ -1193,9 +1222,6 @@ class _Reporter:
                 "value": _num(value),
                 "n": int(n),
                 "n_failures": int(n_failures),
-                "n_neg": None if n_neg is None else int(n_neg),
-                "n_pos": None if n_pos is None else int(n_pos),
-                "is_balanced": None if is_balanced is None else bool(is_balanced),
             }
         )
 
@@ -1210,80 +1236,55 @@ class _Reporter:
             return
         groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for row in self.mainrows:
-            groups[(str(row.get("experiment", "")), str(row.get("prompt_condition", "")))].append(row)
-        main_condition_id_prefix = self.main_key
+            groups[
+                (str(row.get("experiment", "")), str(row.get("prompt_condition", "")))
+            ].append(row)
         any_cell = False
-        for experiment, prompt_condition, mode, dims, include_joint in MAIN_CELL_DEFS:
+        for experiment, prompt_condition, _mode, dims, include_joint in MAIN_CELL_DEFS:
             cell_rows = groups.get((experiment, prompt_condition), [])
             if not cell_rows:
                 continue
             any_cell = True
-            condition_id = f"{prompt_condition}__{main_condition_id_prefix}"
-            if mode == "recognition":
-                self._append_recognition_cell(
-                    cell_rows,
-                    scope="overall",
-                    experiment=experiment,
-                    prompt_condition=prompt_condition,
-                    condition_id=condition_id,
-                    generation_condition=self.main_key,
-                    dims=dims,
-                    include_joint=include_joint,
-                )
-                self._record_headline(
-                    experiment, prompt_condition, mode, cell_rows, dims, include_joint
-                )
-            else:
-                self._append_ab_cell(
-                    cell_rows,
-                    scope="overall",
-                    experiment=experiment,
-                    prompt_condition=prompt_condition,
-                    condition_id=condition_id,
-                    generation_condition=self.main_key,
-                )
-                values = metrics.ab_metrics(cell_rows)
-                self.headline.setdefault("ab", {})[experiment] = {
-                    "accuracy": _num(values.get("accuracy")),
-                    "n": _int(values.get("n")),
-                    "n_failures": _int(values.get("n_failures")),
-                }
+            condition_id = f"{prompt_condition}__{self.main_key}"
+            self._append_recognition_cell(
+                cell_rows,
+                scope="overall",
+                experiment=experiment,
+                prompt_condition=prompt_condition,
+                condition_id=condition_id,
+                generation_condition=self.main_key,
+                dims=dims,
+                include_joint=include_joint,
+            )
+            self._record_headline(
+                experiment, prompt_condition, cell_rows, dims, include_joint
+            )
             if self.per_voice:
                 for voice in _sorted_strings(row.get("voice") for row in cell_rows):
-                    voice_rows = [row for row in cell_rows if str(row.get("voice", "")) == voice]
+                    voice_rows = [
+                        row for row in cell_rows if str(row.get("voice", "")) == voice
+                    ]
                     if not voice_rows:
                         continue
-                    if mode == "recognition":
-                        self._append_recognition_cell(
-                            voice_rows,
-                            scope="voice",
-                            experiment=experiment,
-                            prompt_condition=prompt_condition,
-                            condition_id=condition_id,
-                            generation_condition=self.main_key,
-                            voice=voice,
-                            dims=dims,
-                            include_joint=include_joint,
-                        )
-                    else:
-                        self._append_ab_cell(
-                            voice_rows,
-                            scope="voice",
-                            experiment=experiment,
-                            prompt_condition=prompt_condition,
-                            condition_id=condition_id,
-                            generation_condition=self.main_key,
-                            voice=voice,
-                        )
-            if (
-                mode == "recognition"
-                and experiment in ("exp4", "exp5", "exp6")
-                and prompt_condition == "free"
-            ):
-                pair_types = _sorted_strings(row.get("pair_type") for row in cell_rows)
-                for pair_type in pair_types:
+                    self._append_recognition_cell(
+                        voice_rows,
+                        scope="voice",
+                        experiment=experiment,
+                        prompt_condition=prompt_condition,
+                        condition_id=condition_id,
+                        generation_condition=self.main_key,
+                        voice=voice,
+                        dims=dims,
+                        include_joint=include_joint,
+                    )
+            if experiment in ("exp4", "exp5", "exp6"):
+                for pair_type in _sorted_strings(
+                    row.get("pair_type") for row in cell_rows
+                ):
                     type_rows = [
-                        row for row in cell_rows if str(row.get("pair_type", "")) == pair_type
+                        row
+                        for row in cell_rows
+                        if str(row.get("pair_type", "")) == pair_type
                     ]
                     if not type_rows:
                         continue
@@ -1300,7 +1301,7 @@ class _Reporter:
                     )
         if not any_cell:
             lines.append(
-                "_当前 run 中没有实验一~六的识别/AB 任务行（可能只跑了检测实验或消融子集）。_"
+                "_当前 run 中没有实验一~六的识别任务行（可能只跑了检测实验或消融子集）。_"
             )
 
         lines.extend(self._render_main_table(groups))
@@ -1310,14 +1311,12 @@ class _Reporter:
         self,
         experiment: str,
         prompt_condition: str,
-        mode: str,
         cell_rows: Sequence[Mapping[str, Any]],
         dims: Sequence[str],
         include_joint: bool,
     ) -> None:
         values = metrics.recognition_metrics(cell_rows)
         entry: dict[str, Any] = {
-            "prompt_condition": prompt_condition,
             "n": _int(values.get("n")),
             "n_failures": _int(values.get("n_failures")),
         }
@@ -1327,15 +1326,16 @@ class _Reporter:
             entry[f"{dim}_macro_f1"] = _num(sub.get("macro_f1"))
         if include_joint:
             entry["joint_accuracy"] = _num(values.get("joint_accuracy"))
-        self.headline[experiment] = entry
+        self.headline.setdefault(experiment, {})[prompt_condition] = entry
 
     def _render_main_table(
         self, groups: Mapping[tuple[str, str], Sequence[Mapping[str, Any]]]
     ) -> list[str]:
         lines: list[str] = ["### 2.1 实验 × 指标矩阵", ""]
         lines.append(
-            "> 依据 2026-10-28 更新后的设计文档；A/B 二选一准确率（随机基线 50%）"
-            "对实验四~六单独报告，不并入本矩阵。"
+            "> 依据 2026-10-28 v3 设计：取消 A/B 任务；实验四/五/六各含三个子实验"
+            "（自由检测 / 正确信息 / 错误信息），分别只评估 initial / final / tone；"
+            "检测实验不参与消融。"
         )
         lines.append("")
         lines.append(
@@ -1405,7 +1405,7 @@ class _Reporter:
             lines.extend(
                 [
                     "",
-                    "### 2.4 逐最小对类型（实验四～六 free 识别）",
+                    "### 2.4 逐最小对类型（实验四～六，3 个提示条件）",
                     "",
                     "| 实验 | 最小对类型 | 维度 | 指标 | 值 | 95% CI | n |",
                     "| --- | --- | --- | --- | --- | --- | --- |",
@@ -1428,7 +1428,9 @@ class _Reporter:
     def _baselines(self) -> None:
         groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for row in self.mainrows:
-            groups[(str(row.get("experiment", "")), str(row.get("prompt_condition", "")))].append(row)
+            groups[
+                (str(row.get("experiment", "")), str(row.get("prompt_condition", "")))
+            ].append(row)
 
         def add(
             scope: str,
@@ -1453,17 +1455,14 @@ class _Reporter:
                 }
             )
 
-        # tone-only experiments 1/2 (2026-10-28 design update)
-        for experiment, prompt_condition in (
-            ("exp1", "correct_target"),
-            ("exp2", "wrong_target"),
-        ):
-            tone_rows = groups.get((experiment, prompt_condition), [])
+        def add_tone_baseline(experiment: str, rows: Sequence[Mapping[str, Any]]) -> None:
             gold = [
-                row.get("gold_tone") for row in tone_rows if not _is_missing(row.get("gold_tone"))
+                row.get("gold_tone")
+                for row in rows
+                if not _is_missing(row.get("gold_tone"))
             ]
             if not gold:
-                continue
+                return
             add(
                 "overall",
                 experiment,
@@ -1485,6 +1484,14 @@ class _Reporter:
                 n=_int(majority.get("n")),
             )
 
+        # tone-only experiments 1/2
+        for experiment, prompt_condition in (
+            ("exp1", "correct_target"),
+            ("exp2", "wrong_target"),
+        ):
+            add_tone_baseline(experiment, groups.get((experiment, prompt_condition), []))
+
+        # experiment 3: initial/final majority + tone random/majority
         exp3_rows = groups.get(("exp3", "free"), [])
         if exp3_rows:
             for dimension, column in (
@@ -1492,11 +1499,23 @@ class _Reporter:
                 ("final", "gold_final"),
                 ("tone", "gold_tone"),
             ):
-                gold = [row.get(column) for row in exp3_rows if not _is_missing(row.get(column))]
+                gold = [
+                    row.get(column)
+                    for row in exp3_rows
+                    if not _is_missing(row.get(column))
+                ]
                 if not gold:
                     continue
                 if dimension == "tone":
-                    add("overall", "exp3", "", "tone", "random", metrics.random_baseline(4), n=len(gold))
+                    add(
+                        "overall",
+                        "exp3",
+                        "",
+                        "tone",
+                        "random",
+                        metrics.random_baseline(4),
+                        n=len(gold),
+                    )
                 majority = metrics.majority_baseline(gold)
                 add(
                     "overall",
@@ -1508,66 +1527,39 @@ class _Reporter:
                     label=majority.get("label"),
                     n=_int(majority.get("n")),
                 )
-        for experiment in ("exp4", "exp5", "exp6"):
-            rows = groups.get((experiment, "ab_choice"), [])
-            if rows:
-                add(
-                    "overall",
-                    experiment,
-                    "",
-                    "ab",
-                    "random",
-                    metrics.random_baseline(2),
-                    n=len(rows),
-                )
-            free_rows = groups.get((experiment, "free"), [])
-            if free_rows:
-                dim = EXPERIMENT_METRIC_DIMENSION.get(experiment, "")
-                if dim in ("initial", "final"):
-                    gold = [
-                        row.get(f"gold_{dim}")
-                        for row in free_rows
-                        if not _is_missing(row.get(f"gold_{dim}"))
-                    ]
-                    if gold:
-                        majority = metrics.majority_baseline(gold)
-                        add(
-                            "overall",
-                            experiment,
-                            "",
-                            dim,
-                            "majority",
-                            majority.get("accuracy"),
-                            label=majority.get("label"),
-                            n=_int(majority.get("n")),
-                        )
-                elif dim == "tone":
-                    gold = [
-                        row.get("gold_tone")
-                        for row in free_rows
-                        if not _is_missing(row.get("gold_tone"))
-                    ]
-                    if gold:
-                        add(
-                            "overall",
-                            experiment,
-                            "",
-                            "tone",
-                            "random",
-                            metrics.random_baseline(4),
-                            n=len(gold),
-                        )
-                        majority = metrics.majority_baseline(gold)
-                        add(
-                            "overall",
-                            experiment,
-                            "",
-                            "tone",
-                            "majority",
-                            majority.get("accuracy"),
-                            label=majority.get("label"),
-                            n=_int(majority.get("n")),
-                        )
+
+        # experiments 4/5/6: one output dimension each (v3); the gold distribution is
+        # the same for the free / correct-info / wrong-info sub-experiments, so one
+        # baseline row per dimension is enough.
+        for experiment, dimension in (
+            ("exp4", "initial"),
+            ("exp5", "final"),
+            ("exp6", "tone"),
+        ):
+            rows = groups.get((experiment, "free"), [])
+            if not rows:
+                continue
+            if dimension == "tone":
+                add_tone_baseline(experiment, rows)
+                continue
+            gold = [
+                row.get(f"gold_{dimension}")
+                for row in rows
+                if not _is_missing(row.get(f"gold_{dimension}"))
+            ]
+            if not gold:
+                continue
+            majority = metrics.majority_baseline(gold)
+            add(
+                "overall",
+                experiment,
+                "",
+                dimension,
+                "majority",
+                majority.get("accuracy"),
+                label=majority.get("label"),
+                n=_int(majority.get("n")),
+            )
 
     # ------------------------------------------------------------------
     # Detection analysis
@@ -1797,7 +1789,6 @@ class _Reporter:
             candidates.extend(
                 [
                     base / ABLATION_CORE_NAME,
-                    base / ABLATION_DETECTION_NAME,
                     base / ABLATION_PAIRS_NAME,
                 ]
             )
@@ -1843,24 +1834,22 @@ class _Reporter:
             self._warn("未找到消融子集清单；消融分析按主条件与各条件的公共 items 推断")
         else:
             self.ablation_source = (
-                "ablation_core_items.txt / ablation_detection_items.txt / "
-                "ablation_pairs_items.txt（build-tasks 产物）"
+                "ablation_core_items.txt / ablation_pairs_items.txt（build-tasks 产物）"
             )
         main_frame = self.items[self.items["generation_condition"] == self.main_key]
         main_ids = set(main_frame["item_id"].astype(str))
-        detection = self.detection
         lines.append("### 4.1 消融条件 × 子集")
         lines.append("")
         lines.append(
-            f"> 消融子集来源：{self.ablation_source}。每个消融条件都与主条件 `{self.main_key}` 在与该条件的 **相同 items** "
-            "上比较（下表同时给出主条件在同一子集上的数值）。"
+            f"> 消融子集来源：{self.ablation_source}。每个消融条件都与主条件 "
+            f"`{self.main_key}` 在与该条件的 **相同 items** 上比较"
+            "（下表同时给出主条件在同一子集上的数值）。"
         )
         lines.append(
-            "> 消融分为三组：core（实验一/二/三视图：correct_target / wrong_target 的 tone，"
-            "free 的识别指标）、detection（检测实验，来自 `ablation_detection_items.txt`，"
-            "256 音频 × 6 个检测任务 → main 子集 256:256 平衡）、pairs（实验四/五/六的 free "
-            "维度 + A/B）。检测行的 `is_balanced` 标记该子集 neg/pos 是否配平；"
-            "`is_balanced=False` 的子集指标仅作描述、不做平衡检测集推断。"
+            "> v3 消融只有两组：**core**（实验一/二/三：正确信息 tone、错误信息 tone、"
+            "自由检测识别指标）与 **pairs**（实验四/五/六的三个子实验：自由检测 / 正确信息 / "
+            "错误信息，分别评估 initial / final / tone）。**检测实验不参与消融**，"
+            "检测指标只在主实验的第 3 节报告。"
         )
         lines.append("")
         for key in condition_keys:
@@ -1871,26 +1860,19 @@ class _Reporter:
             if not common:
                 self._warn(f"消融条件 {key} 与主条件没有公共 items；跳过")
                 continue
-            for _label, frame, generation, is_main in (
-                ("main", main_frame[main_frame["item_id"].isin(common)], self.main_key, True),
-                ("ablation", condition_frame[condition_frame["item_id"].isin(common)], key, False),
+            for frame, is_main in (
+                (main_frame[main_frame["item_id"].isin(common)], True),
+                (condition_frame[condition_frame["item_id"].isin(common)], False),
             ):
                 if frame.empty:
                     continue
-                detection_frame = pd.DataFrame()
-                if not detection.empty and "generation_condition" in detection.columns:
-                    detection_frame = detection[
-                        (detection["generation_condition"] == generation)
-                        & (detection["item_id"].astype(str).isin(common))
-                    ]
                 self._collect_ablation_cells(
                     frame,
-                    detection_frame=detection_frame,
                     compared_with=key,
                     is_main=is_main,
                 )
         # markdown table
-        ablation_rows = [row for row in self.ablation_rows]
+        ablation_rows = list(self.ablation_rows)
         if not ablation_rows:
             lines.append("_没有可报告的消融单元（公共 items 为空）。_")
         else:
@@ -1899,62 +1881,27 @@ class _Reporter:
                 by_group[(row["compared_with"], row["group"])].append(row)
             for (compared_with, group), rows in by_group.items():
                 lines.extend(["", f"#### 消融条件 `{compared_with}` — {group} 组", ""])
-                if group == "detection":
-                    lines.append("| 来源 | 指标 | 值 | n (neg/pos) | 配平 |")
-                    lines.append("| --- | --- | --- | --- | --- |")
-                    for row in rows:
-                        source = "主条件" if row["is_main"] else "消融条件"
-                        balanced = (
-                            "—"
-                            if row.get("is_balanced") is None
-                            else ("是" if row["is_balanced"] else "否")
-                        )
-                        n_text = str(row["n"])
-                        if row.get("n_neg") is not None:
-                            n_text = f"{row['n']} ({row['n_neg']}/{row['n_pos']})"
-                        lines.append(
-                            f"| {source} | {row['metric']} | {_fmt(row['value'])} | "
-                            f"{n_text} | {balanced} |"
-                        )
-                else:
-                    lines.append(
-                        "| 来源 | 实验 | 维度 | 指标 | 值 | n | 失败 |"
+                lines.append("| 来源 | 实验 | 提示条件 | 维度 | 指标 | 值 | n | 失败 |")
+                lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+                for row in rows:
+                    source = "主条件" if row["is_main"] else "消融条件"
+                    prompt_title = PROMPT_CONDITION_TITLES.get(
+                        row["prompt_condition"], row["prompt_condition"]
                     )
-                    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
-                    for row in rows:
-                        source = "主条件" if row["is_main"] else "消融条件"
-                        lines.append(
-                            f"| {source} | {row['experiment'] or '—'} | "
-                            f"{DIMENSION_TITLES.get(row['dimension'], row['dimension'])} | "
-                            f"{row['metric']} | {_fmt(row['value'])} | {row['n']} | "
-                            f"{row['n_failures']} |"
-                        )
-            unbalanced = {
-                (row["compared_with"], row["metric"].split(".")[0])
-                for row in ablation_rows
-                if row["group"] == "detection" and row.get("is_balanced") is False
-            }
-            if unbalanced:
-                lines.extend(
-                    [
-                        "",
-                        "> **注意**：以下消融检测子集的 neg/pos 不配平（`is_balanced=False`，见 "
-                        "`ablation.csv` 的 `n_neg`/`n_pos`），其 EP/ER/F1 仅作描述，不按平衡检测集"
-                        "解释：{}。".format(
-                            "、".join(
-                                f"`{condition}` {subset}"
-                                for condition, subset in sorted(unbalanced)
-                            )
-                        ),
-                    ]
-                )
+                    dimension_title = DIMENSION_TITLES.get(
+                        row["dimension"], row["dimension"]
+                    )
+                    lines.append(
+                        f"| {source} | {row['experiment'] or '—'} | "
+                        f"{prompt_title or '—'} | {dimension_title} | {row['metric']} | "
+                        f"{_fmt(row['value'])} | {row['n']} | {row['n_failures']} |"
+                    )
         self.md["ablation"] = lines
 
     def _collect_ablation_cells(
         self,
         frame: pd.DataFrame,
         *,
-        detection_frame: pd.DataFrame,
         compared_with: str,
         is_main: bool,
     ) -> None:
@@ -1968,8 +1915,13 @@ class _Reporter:
                 mask = mask & frame["prompt_condition"].eq(prompt_condition)
             return frame[mask].to_dict("records")
 
-        def append_recognition(experiment: str, prompt_condition: str,
-                               dims: Sequence[str], include_joint: bool, group: str) -> None:
+        def append_recognition(
+            experiment: str,
+            prompt_condition: str,
+            dims: Sequence[str],
+            include_joint: bool,
+            group: str,
+        ) -> None:
             rows = subset_rows(experiment, prompt_condition)
             if not rows:
                 return
@@ -2012,33 +1964,20 @@ class _Reporter:
         append_recognition("exp1", "correct_target", ("tone",), False, "core")
         append_recognition("exp2", "wrong_target", ("tone",), False, "core")
         append_recognition("exp3", "free", ("initial", "final", "tone"), True, "core")
-        # pairs group: experiments 4-6 (recognition + A/B)
-        for experiment, dim in (("exp4", "initial"), ("exp5", "final"), ("exp6", "tone")):
-            append_recognition(experiment, "free", (dim,), False, "pairs")
-        for experiment in ("exp4", "exp5", "exp6"):
-            rows = subset_rows(experiment, "ab_choice")
-            if not rows:
-                continue
-            values = metrics.ab_metrics(rows)
-            self._append_ablation_metric(
-                group="pairs",
-                compared_with=compared_with,
-                is_main=is_main,
-                condition_id=f"ab_choice__{generation}",
-                generation_condition=generation,
-                experiment=experiment,
-                prompt_condition="ab_choice",
-                dimension="ab",
-                metric="accuracy",
-                value=values.get("accuracy"),
-                n=_int(values.get("n")),
-                n_failures=_int(values.get("n_failures")),
-            )
-        # parse failure rate for the core (exp1-3) and pairs (exp4-6) groups
+        # pairs group: experiments 4/5/6 × three sub-experiments
+        for experiment, dimension in (
+            ("exp4", "initial"),
+            ("exp5", "final"),
+            ("exp6", "tone"),
+        ):
+            for prompt_condition in ("free", "correct_target", "wrong_target"):
+                append_recognition(
+                    experiment, prompt_condition, (dimension,), False, "pairs"
+                )
+        # parse failure rates for the two groups
         experiment_values = frame["experiment"].astype(str)
         for group_name, mask, experiment_label in (
             ("parse_core", experiment_values.isin(["exp1", "exp2", "exp3"]), "exp1-3"),
-            ("parse_detection", experiment_values.isin(["detect"]), "detect"),
             ("parse_pairs", experiment_values.isin(["exp4", "exp5", "exp6"]), "exp4-6"),
         ):
             group_frame = frame[mask]
@@ -2060,90 +1999,41 @@ class _Reporter:
                 n=total,
                 n_failures=failures,
             )
-        # detection group: metrics come from detection_rows.parquet restricted to the
-        # same audio subset (``ablation_detection_items.txt`` keeps all six detection
-        # tasks per audio, so both the balanced main subset and the typed subsets are
-        # computable; small er/weng-related imbalance in the initial subset is flagged
-        # via ``is_balanced``).
-        if detection_frame is not None and not detection_frame.empty:
-            detection_frame = detection_frame[
-                detection_frame["detection_role"].isin(["neg", "pos"])
-            ]
-            subsets = _sorted_strings(detection_frame["detection_subset"].tolist())
-            for subset in subsets:
-                rows = detection_frame[
-                    detection_frame["detection_subset"].astype(str) == subset
-                ].to_dict("records")
-                if not rows:
-                    continue
-                values = metrics.detection_metrics(rows)
-                n = (
-                    _int(values.get("tp"))
-                    + _int(values.get("fp"))
-                    + _int(values.get("tn"))
-                    + _int(values.get("fn"))
-                )
-                n_failures = _int(values.get("n_failures_neg")) + _int(
-                    values.get("n_failures_pos")
-                )
-                n_neg = _int(values.get("n_neg"))
-                n_pos = _int(values.get("n_pos"))
-                balanced = n_neg == n_pos
-                for metric_name in (
-                    "error_precision",
-                    "error_recall",
-                    "error_f1",
-                    "fpr",
-                    "fnr",
-                    "accuracy",
-                    "balanced_accuracy",
-                ):
-                    self._append_ablation_metric(
-                        group="detection",
-                        compared_with=compared_with,
-                        is_main=is_main,
-                        condition_id=f"*__{generation}",
-                        generation_condition=generation,
-                        experiment="",
-                        prompt_condition="",
-                        dimension="detection",
-                        metric=f"{subset}.{metric_name}",
-                        value=values.get(metric_name),
-                        n=n,
-                        n_failures=n_failures,
-                        n_neg=n_neg,
-                        n_pos=n_pos,
-                        is_balanced=balanced,
-                    )
 
     # ------------------------------------------------------------------
     # Paired condition comparisons (McNemar + paired bootstrap)
     # ------------------------------------------------------------------
     def _family_correctness(self, frame: pd.DataFrame) -> dict[str, dict[str, int]]:
-        """Correctness maps for the non-detection comparison families."""
+        """Correctness maps for the comparison families (v3 ``COMPARISON_SPECS``)."""
         result: dict[str, dict[str, int]] = {}
         if frame.empty:
             return result
         ok = _bool_series(frame["parse_status"].eq("ok"))
         experiment = frame["experiment"].astype(str)
         prompt_condition = frame["prompt_condition"].astype(str)
-        tone_ok = ok & frame["pred_tone"].notna()
         initial_ok = ok & frame["pred_initial"].notna()
         final_ok = ok & frame["pred_final"].notna()
+        tone_ok = ok & frame["pred_tone"].notna()
         consistency_ok = ok & frame["pred_consistent"].notna()
-        tone_correct = _eq_mask(frame["gold_tone"], frame["pred_tone"])
         initial_correct = _eq_mask(frame["gold_initial"], frame["pred_initial"])
         final_correct = _eq_mask(frame["gold_final"], frame["pred_final"])
+        tone_correct = _eq_mask(frame["gold_tone"], frame["pred_tone"])
         joint_correct = initial_correct & final_correct & tone_correct
         # consistency correctness is pure equality: the detect experiment carries both
         # consistent (gold=True) and inconsistent (gold=False) claims, so each side must
         # compare equal to its matching prediction (missing predictions are handled by
-        # the per-row validity mask in ``add``).
+        # the per-row validity mask below).
         consistency_correct = _eq_mask(
             frame["consistent_gold"].astype("boolean"),
             frame["pred_consistent"].astype("boolean"),
         )
-        choice_correct = _eq_mask(frame["correct_choice"], frame["pred_choice"])
+        dimensions: dict[str, tuple[pd.Series, pd.Series]] = {
+            "initial": (initial_ok, initial_correct),
+            "final": (final_ok, final_correct),
+            "tone": (tone_ok, tone_correct),
+            "joint": (ok, joint_correct),
+            "consistency": (consistency_ok, consistency_correct),
+        }
 
         def add(name: str, scope: pd.Series, valid: pd.Series, correct: pd.Series) -> None:
             mask = _bool_series(scope) & _bool_series(valid)
@@ -2153,28 +2043,13 @@ class _Reporter:
             values = _bool_series(correct).loc[mask].astype(int).tolist()
             result.setdefault(name, {}).update(dict(zip(item_ids, values, strict=True)))
 
-        exp1 = experiment.eq("exp1") & prompt_condition.eq("correct_target")
-        exp2 = experiment.eq("exp2") & prompt_condition.eq("wrong_target")
-        add("exp1|tone", exp1, tone_ok, tone_correct)
-        add("exp2|tone", exp2, tone_ok, tone_correct)
-        # consistency judgement lives in the dedicated detect experiment (2026-10-28)
-        detect = experiment.eq("detect") & prompt_condition.eq("detect")
-        add("detect|consistency", detect, consistency_ok, consistency_correct)
-        exp3 = experiment.eq("exp3") & prompt_condition.eq("free")
-        add("exp3|initial", exp3, initial_ok, initial_correct)
-        add("exp3|final", exp3, final_ok, final_correct)
-        add("exp3|tone", exp3, tone_ok, tone_correct)
-        add("exp3|joint", exp3, ok, joint_correct)
-        for experiment_name, dim, dim_ok, dim_correct in (
-            ("exp4", "initial", initial_ok, initial_correct),
-            ("exp5", "final", final_ok, final_correct),
-            ("exp6", "tone", tone_ok, tone_correct),
-        ):
-            scope = experiment.eq(experiment_name) & prompt_condition.eq("free")
-            add(f"{experiment_name}|{dim}", scope, dim_ok, dim_correct)
-        for experiment_name in ("exp4", "exp5", "exp6"):
-            scope = experiment.eq(experiment_name) & prompt_condition.eq("ab_choice")
-            add(f"{experiment_name}|ab", scope, ok, choice_correct)
+        for family, _metric_name, dimension, prompt_condition_value in COMPARISON_SPECS:
+            experiment_name = family.split(".", 1)[0]
+            scope = experiment.eq(experiment_name) & prompt_condition.eq(
+                prompt_condition_value
+            )
+            valid, correct = dimensions[dimension]
+            add(f"{family}|{dimension}", scope, valid, correct)
         return result
 
     @staticmethod
@@ -2383,6 +2258,13 @@ class _Reporter:
                     _fmt(row["p_holm"], 4),
                 )
             )
+        if "detect" not in {str(row["family"]) for row in self.comparison_rows}:
+            lines.append("")
+            lines.append(
+                "> 说明：检测一致性 family 需要 `detect` 任务在两侧条件中都存在；"
+                "v3 设计里检测实验只跑主条件（不参与消融），因此该 family 在消融条件"
+                "对比较中自动跳过，检测指标见第 3 节。"
+            )
         self.md["comparisons"] = lines
 
     def _paired_bootstrap(
@@ -2410,11 +2292,11 @@ class _Reporter:
 
     @staticmethod
     def _comparison_spec(name: str) -> tuple[str, str, str, str]:
-        experiment, dimension = name.split("|", 1)
-        for spec_experiment, metric_name, spec_dimension, prompt_condition in COMPARISON_SPECS:
-            if spec_experiment == experiment and spec_dimension == dimension:
-                return experiment, metric_name, spec_dimension, prompt_condition
-        return experiment, f"{dimension}_accuracy", dimension, ""
+        family, dimension = name.split("|", 1)
+        for spec_family, metric_name, spec_dimension, prompt_condition in COMPARISON_SPECS:
+            if spec_family == family and spec_dimension == dimension:
+                return spec_family, metric_name, spec_dimension, prompt_condition
+        return family, f"{dimension}_accuracy", dimension, ""
 
     def _apply_multiple_comparison(self) -> None:
         if not self.comparison_rows:
@@ -2441,7 +2323,7 @@ class _Reporter:
         family_rank["detection"] = len(family_rank)
         self.comparison_rows.sort(
             key=lambda row: (
-                family_rank.get(str(row["family"]), 99),
+                family_rank.get(str(row["family"]).split(".", 1)[0], 99),
                 str(row["metric"]),
                 str(row["axis"]),
                 str(row["condition_a"]),
@@ -2449,6 +2331,641 @@ class _Reporter:
             )
         )
 
+    # ------------------------------------------------------------------
+    # Run cost & token usage (token accounting sec. 2026-10-28)
+    # ------------------------------------------------------------------
+    def _resolve_pricing(self) -> tuple[Pricing | None, str | None, list[str]]:
+        """Resolve the pricing snapshot: manifest > manifest.config > config."""
+        notes: list[str] = []
+        candidates: list[tuple[str, Any]] = [
+            ("manifest.pricing", self.manifest.get("pricing") if self.manifest else None),
+        ]
+        manifest_config = (
+            self.manifest.get("config")
+            if isinstance(self.manifest.get("config"), Mapping)
+            else None
+        )
+        if manifest_config is not None:
+            candidates.append(("manifest.config.pricing", manifest_config.get("pricing")))
+        candidates.append(("config.pricing", self.cfg.get("pricing")))
+        for source, raw in candidates:
+            if not isinstance(raw, Mapping) or not raw:
+                continue
+            pricing = _pricing_from_mapping(raw)
+            if pricing is None:
+                continue
+            if source == "config.pricing":
+                notes.append(
+                    "run_manifest 未携带 pricing，使用当前 config 的 pricing 快照"
+                    "（可能不是该 run 运行时的历史价格）"
+                )
+            return pricing, source, notes
+        notes.append("未找到 pricing（manifest / config 均无），无法计算成本；仅汇总 token 用量")
+        return None, None, notes
+
+    def _resolve_budget(self) -> float | None:
+        values = [self.manifest.get("budget_cny") if self.manifest else None]
+        values.append(self.cfg.get("generation.budget_cny"))
+        for value in values:
+            if value in (None, "", 0, 0.0):
+                continue
+            try:
+                budget = float(value)
+            except (TypeError, ValueError):
+                continue
+            if budget > 0:
+                return budget
+        return None
+
+    def _generation_usage(self, pricing: Pricing) -> dict[str, Any] | None:
+        """Stream ``generations.jsonl`` into token / latency / cost totals."""
+        path = self.run_dir / GENERATIONS_NAME
+        if not path.exists() or path.stat().st_size == 0:
+            return None
+        counters = {"n_lines": 0, "n_malformed": 0, "n_usage_records": 0}
+
+        def _records():
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except (TypeError, ValueError):
+                        counters["n_malformed"] += 1
+                        continue
+                    counters["n_lines"] += 1
+                    if isinstance(record, Mapping) and record.get("usage"):
+                        counters["n_usage_records"] += 1
+                    yield record
+
+        try:
+            summary = summarize_generations(_records(), pricing)
+        except OSError as exc:  # pragma: no cover - unreadable file
+            self._usage_notes.append(f"读取 generations.jsonl 失败（{exc}）；无法汇总用量")
+            return None
+        if counters["n_lines"] == 0:
+            return None
+        summary.update(counters)
+        return summary
+
+    def _usage_from_manifest_counts(self) -> dict[str, Any] | None:
+        """Fallback: use the runner's own accounting stored in ``manifest.counts``."""
+        counts = self.manifest.get("counts") if self.manifest else None
+        if not isinstance(counts, Mapping):
+            return None
+        relevant = (
+            "n_calls",
+            "n_ok",
+            "n_error",
+            "prompt_tokens",
+            "input_tokens",
+            "cached_tokens",
+            "completion_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "cost_cny",
+        )
+        if not any(counts.get(key) is not None for key in relevant):
+            return None
+        n_ok = _as_int_or_none(counts.get("n_ok"))
+        n_errors = _as_int_or_none(counts.get("n_error"))
+        n_calls = _as_int_or_none(counts.get("n_calls"))
+        if n_calls is None and n_ok is not None and n_errors is not None:
+            n_calls = n_ok + n_errors
+        prompt_tokens = counts.get("prompt_tokens")
+        if prompt_tokens is None:
+            prompt_tokens = counts.get("input_tokens")
+        completion_tokens = counts.get("completion_tokens")
+        if completion_tokens is None:
+            completion_tokens = counts.get("output_tokens")
+        overall = {
+            "n_calls": n_calls or 0,
+            "n_errors": n_errors or 0,
+            "prompt_tokens": _as_int_or_none(prompt_tokens),
+            "cached_tokens": _as_int_or_none(counts.get("cached_tokens")),
+            "completion_tokens": _as_int_or_none(completion_tokens),
+            "reasoning_tokens": _as_int_or_none(counts.get("reasoning_tokens")),
+            "input_cost_cny": None,
+            "output_cost_cny": None,
+            "cost_cny": _as_float_or_none(counts.get("cost_cny")),
+            "avg_latency_s": None,
+        }
+        return {
+            "overall": overall,
+            "by_condition": {},
+            "by_generation": {},
+            "n_lines": None,
+            "n_malformed": 0,
+            "n_usage_records": None,
+        }
+
+    @staticmethod
+    def _totals_cost(
+        totals: Mapping[str, Any], pricing: Pricing | None
+    ) -> tuple[float | None, float | None, float | None]:
+        """(input, output, total) CNY cost for aggregated token totals."""
+        if pricing is None:
+            return None, None, None
+        prompt = _as_int_or_none(totals.get("prompt_tokens"))
+        completion = _as_int_or_none(totals.get("completion_tokens"))
+        if prompt is None or completion is None:
+            return None, None, None
+        cached = _as_int_or_none(totals.get("cached_tokens")) or 0
+        input_cost = pricing.input_cost(prompt, cached)
+        output_cost = pricing.output_cost(completion)
+        return input_cost, output_cost, input_cost + output_cost
+
+    def _usage_results(self) -> None:
+        lines: list[str] = []
+        self._usage_notes = []
+        pricing, pricing_source, pricing_notes = self._resolve_pricing()
+        notes = list(pricing_notes)
+        budget = self._resolve_budget()
+        token_pricing = pricing if pricing is not None else Pricing()
+        computed = self._generation_usage(token_pricing)
+        counts_usage = self._usage_from_manifest_counts()
+        counts = (
+            self.manifest.get("counts")
+            if isinstance(self.manifest.get("counts"), Mapping)
+            else {}
+        )
+        counts_cost = _as_float_or_none(counts.get("cost_cny")) if counts else None
+
+        summary: dict[str, Any] | None = None
+        source: str | None = None
+        if computed is not None:
+            if computed.get("n_usage_records", 0) == 0 and counts_usage is not None:
+                notes.append(
+                    "generations.jsonl 中 usage 字段全部缺失；用量改由 manifest counts 汇总"
+                )
+                summary, source = counts_usage, "manifest_counts"
+            else:
+                summary, source = computed, "generations.jsonl"
+                if computed.get("n_usage_records", 0) == 0:
+                    notes.append(
+                        "generations.jsonl 中没有任何 usage 字段；只能报告调用数与耗时"
+                    )
+                if computed.get("n_malformed", 0):
+                    notes.append(
+                        f"generations.jsonl 有 {computed['n_malformed']} 行无法解析为 JSON，已跳过"
+                    )
+        elif counts_usage is not None:
+            notes.append("未找到 generations.jsonl；用量改由 manifest counts 汇总")
+            summary, source = counts_usage, "manifest_counts"
+
+        if summary is None:
+            notes.append(
+                "无可用用量数据（generations.jsonl 缺失/为空，manifest counts 也没有 token 记录）"
+            )
+            self.usage_summary = {
+                "source": None,
+                "generations_path": None,
+                "tokens_available": False,
+                "n_calls": None,
+                "n_ok": None,
+                "n_errors": None,
+                "prompt_tokens": None,
+                "cached_tokens": None,
+                "completion_tokens": None,
+                "reasoning_tokens": None,
+                "total_tokens": None,
+                "avg_latency_s": None,
+                "n_lines": None,
+                "n_malformed": 0,
+                "n_usage_records": None,
+                "per_condition": {},
+            }
+            self.cost_summary = {
+                "currency": None,
+                "pricing_source": pricing_source,
+                "pricing": pricing.as_dict() if pricing is not None else None,
+                "input_cost_cny": None,
+                "output_cost_cny": None,
+                "total_cost_cny": None,
+                "n_calls": None,
+                "per_generation_condition": {},
+                "budget_cny": budget,
+                "budget_remaining_cny": None,
+                "budget_used_pct": None,
+                "budget_status": "unavailable",
+                "status": "no_data",
+                "notes": notes,
+            }
+            lines.append("### 6.1 总览")
+            lines.append("")
+            lines.append(
+                "- 没有可用的用量数据：`generations.jsonl` 缺失/为空，"
+                "`run_manifest.json` 的 `counts` 也没有 token/成本记录。"
+            )
+            lines.append(
+                "- 成本核算需要 runner 记录的 `usage`（或 manifest counts）与 pricing 配置；"
+                "本 run 无法报告花费。"
+            )
+            lines.extend(["", "### 6.4 降级说明", ""])
+            lines.extend([f"- {note}" for note in notes])
+            self.md["usage"] = lines
+            return
+
+        overall = dict(summary.get("overall") or {})
+        n_calls = _as_int_or_none(overall.get("n_calls")) or 0
+        n_errors = _as_int_or_none(overall.get("n_errors")) or 0
+        n_ok = max(n_calls - n_errors, 0)
+        tokens_available = False
+        if source == "generations.jsonl":
+            tokens_available = (summary.get("n_usage_records") or 0) > 0
+        else:
+            tokens_available = any(
+                overall.get(key) is not None
+                for key in ("prompt_tokens", "completion_tokens")
+            )
+
+        def token_value(totals: Mapping[str, Any], key: str) -> int | None:
+            if not tokens_available:
+                return None
+            return _as_int_or_none(totals.get(key))
+
+        def row_costs(
+            totals: Mapping[str, Any],
+        ) -> tuple[float | None, float | None, float | None]:
+            input_cost, output_cost, total_cost = self._totals_cost(totals, pricing)
+            if total_cost is not None:
+                return input_cost, output_cost, total_cost
+            if source == "manifest_counts":
+                total_from_counts = _as_float_or_none(totals.get("cost_cny"))
+                return None, None, total_from_counts
+            return None, None, None
+
+        def make_usage_row(
+            scope: str,
+            condition_id: str,
+            generation_condition: str,
+            totals: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            input_cost, output_cost, total_cost = row_costs(totals)
+            return {
+                "scope": scope,
+                "condition_id": condition_id,
+                "generation_condition": generation_condition,
+                "n_calls": _as_int_or_none(totals.get("n_calls")) or 0,
+                "n_errors": _as_int_or_none(totals.get("n_errors")) or 0,
+                "prompt_tokens": token_value(totals, "prompt_tokens"),
+                "cached_tokens": token_value(totals, "cached_tokens"),
+                "completion_tokens": token_value(totals, "completion_tokens"),
+                "reasoning_tokens": token_value(totals, "reasoning_tokens"),
+                "input_cost_cny": _round4(input_cost),
+                "output_cost_cny": _round4(output_cost),
+                "total_cost_cny": _round4(total_cost),
+                "avg_latency_s": _round4(totals.get("avg_latency_s")),
+            }
+
+        overall_row = make_usage_row("overall", "", "", overall)
+        self.usage_rows = [overall_row]
+        overall_input = _as_float_or_none(overall_row["input_cost_cny"])
+        overall_output = _as_float_or_none(overall_row["output_cost_cny"])
+        overall_total = _as_float_or_none(overall_row["total_cost_cny"])
+        counts_used_as_cost = False
+        if overall_total is None and counts_cost is not None:
+            overall_total = counts_cost
+            counts_used_as_cost = True
+            overall_row["total_cost_cny"] = _round4(counts_cost)
+            notes.append(
+                f"成本取自 run_manifest.counts.cost_cny={counts_cost:.6f} CNY"
+                "（缺少 pricing 明细，无法拆分输入/输出成本）"
+            )
+
+        prompt_tokens = token_value(overall, "prompt_tokens")
+        completion_tokens = token_value(overall, "completion_tokens")
+        reasoning_tokens = token_value(overall, "reasoning_tokens")
+        cached_tokens = token_value(overall, "cached_tokens")
+        total_tokens = (
+            prompt_tokens + completion_tokens
+            if prompt_tokens is not None and completion_tokens is not None
+            else None
+        )
+        avg_latency = _round4(overall.get("avg_latency_s"))
+
+        per_condition: dict[str, Any] = {}
+        for condition_id, totals in (summary.get("by_condition") or {}).items():
+            condition_id = str(condition_id)
+            generation = (
+                generation_key(condition_id) if "__" in condition_id else condition_id
+            )
+            row = make_usage_row(
+                "per_condition", condition_id, generation, dict(totals)
+            )
+            self.usage_rows.append(row)
+            input_cost, output_cost, total_cost = row_costs(dict(totals))
+            per_condition[condition_id] = {
+                "generation_condition": generation,
+                "n_calls": _as_int_or_none(totals.get("n_calls")) or 0,
+                "n_errors": _as_int_or_none(totals.get("n_errors")) or 0,
+                "prompt_tokens": token_value(totals, "prompt_tokens"),
+                "cached_tokens": token_value(totals, "cached_tokens"),
+                "completion_tokens": token_value(totals, "completion_tokens"),
+                "reasoning_tokens": token_value(totals, "reasoning_tokens"),
+                "input_cost_cny": _round4(input_cost),
+                "output_cost_cny": _round4(output_cost),
+                "total_cost_cny": _round4(total_cost),
+                "avg_latency_s": _round4(totals.get("avg_latency_s")),
+            }
+
+        per_generation_cost: dict[str, Any] = {}
+        generation_rows: list[dict[str, Any]] = []
+        for generation, totals in (summary.get("by_generation") or {}).items():
+            generation = str(generation)
+            totals = dict(totals)
+            input_cost, output_cost, total_cost = row_costs(totals)
+            per_generation_cost[generation] = {
+                "n_calls": _as_int_or_none(totals.get("n_calls")) or 0,
+                "n_errors": _as_int_or_none(totals.get("n_errors")) or 0,
+                "prompt_tokens": token_value(totals, "prompt_tokens"),
+                "cached_tokens": token_value(totals, "cached_tokens"),
+                "completion_tokens": token_value(totals, "completion_tokens"),
+                "reasoning_tokens": token_value(totals, "reasoning_tokens"),
+                "input_cost_cny": _round4(input_cost),
+                "output_cost_cny": _round4(output_cost),
+                "total_cost_cny": _round4(total_cost),
+                "avg_latency_s": _round4(totals.get("avg_latency_s")),
+            }
+            generation_rows.append(
+                {
+                    "generation_condition": generation,
+                    "n_calls": per_generation_cost[generation]["n_calls"],
+                    "n_errors": per_generation_cost[generation]["n_errors"],
+                    "prompt_tokens": per_generation_cost[generation]["prompt_tokens"],
+                    "cached_tokens": per_generation_cost[generation]["cached_tokens"],
+                    "completion_tokens": per_generation_cost[generation][
+                        "completion_tokens"
+                    ],
+                    "reasoning_tokens": per_generation_cost[generation][
+                        "reasoning_tokens"
+                    ],
+                    "input_cost_cny": per_generation_cost[generation]["input_cost_cny"],
+                    "output_cost_cny": per_generation_cost[generation]["output_cost_cny"],
+                    "total_cost_cny": per_generation_cost[generation]["total_cost_cny"],
+                    "avg_latency_s": per_generation_cost[generation]["avg_latency_s"],
+                }
+            )
+
+        # -- budget status -------------------------------------------------
+        if budget is None:
+            budget_info: dict[str, Any] = {
+                "budget_cny": None,
+                "cost_cny": _round4(overall_total),
+                "within_budget": None,
+                "used_fraction": None,
+                "used_pct": None,
+                "remaining_cny": None,
+                "status": "no_budget",
+            }
+        elif overall_total is None:
+            budget_info = {
+                "budget_cny": budget,
+                "cost_cny": None,
+                "within_budget": None,
+                "used_fraction": None,
+                "used_pct": None,
+                "remaining_cny": None,
+                "status": "unavailable",
+            }
+        else:
+            status = budget_status(overall_total, budget)
+            within = status.get("within_budget")
+            budget_info = {
+                "budget_cny": budget,
+                "cost_cny": _round4(overall_total),
+                "within_budget": within,
+                "used_fraction": _as_float_or_none(status.get("used_fraction")),
+                "used_pct": _round4(
+                    (overall_total / budget) * 100.0 if budget else None
+                ),
+                "remaining_cny": _round4(budget - overall_total),
+                "status": "within_budget" if within else "over_budget",
+            }
+        if isinstance(counts, Mapping) and counts.get("n_skipped_budget"):
+            notes.append(
+                "该 run 因预算 guard 提前停止："
+                f"n_skipped_budget={counts.get('n_skipped_budget')}"
+            )
+        if self.manifest.get("status") == "budget_exceeded":
+            self._warn("run 状态为 budget_exceeded：预算 guard 提前停止了生成请求")
+
+        # -- cross-checks against the runner's own accounting --------------
+        counts_n_calls = _as_int_or_none(counts.get("n_calls")) if counts else None
+        if source == "generations.jsonl" and counts_n_calls is not None:
+            if counts_n_calls != n_calls:
+                notes.append(
+                    f"manifest counts.n_calls={counts_n_calls} 与 generations 行数 "
+                    f"{n_calls} 不一致（可能存在未写入 generations 的调用）"
+                )
+        if (
+            source == "generations.jsonl"
+            and not counts_used_as_cost
+            and counts_cost is not None
+            and overall_total is not None
+        ):
+            tolerance = max(1e-4, 0.001 * max(abs(counts_cost), 1.0))
+            if abs(overall_total - counts_cost) > tolerance:
+                notes.append(
+                    f"manifest counts.cost_cny={counts_cost:.6f} 与按 generations usage "
+                    f"重算的 {overall_total:.6f} 不一致"
+                )
+
+        cost_status = "computed"
+        if overall_total is None:
+            cost_status = "no_pricing" if pricing is None else "no_usage"
+        currency = None
+        raw_pricing = self.manifest.get("pricing") if self.manifest else None
+        if isinstance(raw_pricing, Mapping):
+            currency = raw_pricing.get("currency")
+        if currency is None and pricing is not None:
+            currency = pricing.currency
+        if currency is None and overall_total is not None:
+            currency = "CNY"
+
+        self.usage_summary = {
+            "source": source,
+            "generations_path": (
+                str(self.run_dir / GENERATIONS_NAME)
+                if source == "generations.jsonl"
+                else None
+            ),
+            "tokens_available": tokens_available,
+            "n_calls": n_calls,
+            "n_ok": n_ok,
+            "n_errors": n_errors,
+            "prompt_tokens": prompt_tokens,
+            "cached_tokens": cached_tokens,
+            "completion_tokens": completion_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "total_tokens": total_tokens,
+            "avg_latency_s": avg_latency,
+            "n_lines": summary.get("n_lines"),
+            "n_malformed": _as_int_or_none(summary.get("n_malformed")) or 0,
+            "n_usage_records": summary.get("n_usage_records"),
+            "per_condition": per_condition,
+        }
+        self.cost_summary = {
+            "currency": currency,
+            "pricing_source": pricing_source,
+            "pricing": pricing.as_dict() if pricing is not None else None,
+            "input_cost_cny": _round4(overall_input),
+            "output_cost_cny": _round4(overall_output),
+            "total_cost_cny": _round4(overall_total),
+            "n_calls": n_calls,
+            "per_generation_condition": per_generation_cost,
+            "budget_cny": budget_info.get("budget_cny"),
+            "budget_remaining_cny": budget_info.get("remaining_cny"),
+            "budget_used_pct": budget_info.get("used_pct"),
+            "budget_status": budget_info.get("status"),
+            "budget": budget_info,
+            "status": cost_status,
+            "notes": notes,
+        }
+
+        # -- markdown ------------------------------------------------------
+        lines.extend(["### 6.1 总览", ""])
+        if source == "generations.jsonl":
+            lines.append(
+                "- 用量来源：`generations.jsonl`（"
+                f"{_fmt_count(summary.get('n_lines'))} 行调用记录，"
+                f"{_fmt_count(summary.get('n_usage_records'))} 行带 usage"
+                + (
+                    f"，跳过 {summary['n_malformed']} 行无法解析记录"
+                    if summary.get("n_malformed")
+                    else ""
+                )
+                + "）"
+            )
+        else:
+            lines.append(
+                "- 用量来源：`run_manifest.json` 的 `counts`（runner 记账总量；"
+                "无逐条件明细）"
+            )
+        lines.append(f"- 调用：{_fmt_count(n_calls)}（成功 {_fmt_count(n_ok)} / 失败 {_fmt_count(n_errors)}）")
+        if tokens_available:
+            lines.append(
+                f"- token：输入 {_fmt_count(prompt_tokens)}（缓存命中 {_fmt_count(cached_tokens)}）；输出 {_fmt_count(completion_tokens)}（reasoning {_fmt_count(reasoning_tokens)}）；合计 {_fmt_count(total_tokens)}"
+            )
+        else:
+            lines.append("- token：不可用（generations.jsonl 未记录 usage）")
+        if overall_total is not None:
+            if overall_input is not None and overall_output is not None:
+                lines.append(
+                    f"- 成本：¥{overall_total:.4f}（输入 ¥{overall_input:.4f} + "
+                    f"输出 ¥{overall_output:.4f}）"
+                )
+            else:
+                lines.append(f"- 成本：¥{overall_total:.4f}（明细不可用，来自 manifest counts）")
+        else:
+            lines.append("- 成本：无法计算（缺少 pricing 或 usage，见 6.4 降级说明）")
+        lines.append(
+            f"- 平均延迟：{avg_latency:.3f} s" if avg_latency is not None
+            else "- 平均延迟：—"
+        )
+        if counts and any(
+            counts.get(key) is not None
+            for key in ("n_calls", "cost_cny", "prompt_tokens", "completion_tokens")
+        ):
+            lines.append(
+                "- runner 记账（manifest counts）：n_calls={}，cost_cny={}，"
+                "prompt_tokens={}，completion_tokens={}".format(
+                    _fmt_count(counts.get("n_calls")),
+                    (
+                        f"{float(counts['cost_cny']):.4f}"
+                        if _as_float_or_none(counts.get("cost_cny")) is not None
+                        else "—"
+                    ),
+                    _fmt_count(counts.get("prompt_tokens")),
+                    _fmt_count(counts.get("completion_tokens")),
+                )
+            )
+        lines.extend(["", "### 6.2 逐生成条件", ""])
+        if generation_rows:
+            lines.append(
+                "| 生成条件 | 调用数 | 失败 | prompt tokens | cached tokens | "
+                "completion tokens | reasoning tokens | 成本 CNY | 平均延迟 (s) |"
+            )
+            lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+            for row in generation_rows:
+                cost_text = (
+                    f"{row['total_cost_cny']:.4f}"
+                    if row["total_cost_cny"] is not None
+                    else "—"
+                )
+                latency_text = (
+                    f"{row['avg_latency_s']:.3f}"
+                    if row["avg_latency_s"] is not None
+                    else "—"
+                )
+                lines.append(
+                    "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+                        row["generation_condition"],
+                        _fmt_count(row["n_calls"]),
+                        _fmt_count(row["n_errors"]),
+                        _fmt_count(row["prompt_tokens"]),
+                        _fmt_count(row["cached_tokens"]),
+                        _fmt_count(row["completion_tokens"]),
+                        _fmt_count(row["reasoning_tokens"]),
+                        cost_text,
+                        latency_text,
+                    )
+                )
+        else:
+            lines.append(
+                "_没有逐生成条件用量数据（manifest counts 只提供总量，或该 run "
+                "没有按条件记录 usage）。_"
+            )
+        lines.extend(["", "### 6.3 预算", ""])
+        if budget is None:
+            lines.append("- 未设置预算：`run_manifest.budget_cny` 为 null。")
+        elif overall_total is None:
+            lines.append(
+                f"- 预算 ¥{budget:.2f}；成本无法计算，预算状态未知。"
+            )
+        else:
+            pct = (overall_total / budget) * 100.0
+            if budget_info.get("within_budget"):
+                lines.append(
+                    f"- 预算 ¥{budget:.2f}，实际 ¥{overall_total:.4f}，"
+                    f"占比 {pct:.2f}%，状态：**在预算内**"
+                    f"（剩余 ¥{max(budget - overall_total, 0.0):.4f}）。"
+                )
+            else:
+                lines.append(
+                    f"- 预算 ¥{budget:.2f}，实际 ¥{overall_total:.4f}，"
+                    f"占比 {pct:.2f}%，状态：**超预算**"
+                    f"（超出 ¥{overall_total - budget:.4f}）。"
+                )
+        lines.extend(["", "### 6.4 计费口径与降级说明", ""])
+        if pricing is not None:
+            lines.append(
+                "| 计费项 | 单价 |"
+            )
+            lines.append("| --- | --- |")
+            lines.append(f"| 币种 | {pricing.currency} |")
+            lines.append(f"| input（未命中缓存） | ¥{pricing.input_per_mtok:g} / 1M tokens |")
+            lines.append(
+                f"| input（缓存命中） | ¥{pricing.cache_hit_input_per_mtok:g} / 1M tokens |"
+            )
+            lines.append(f"| output（含 reasoning） | ¥{pricing.output_per_mtok:g} / 1M tokens |")
+            lines.append(
+                f"| 音频输入 token | {pricing.audio_tokens_per_second:g} tokens / 秒 |"
+            )
+            lines.append("")
+        lines.append(
+            "- 成本公式：`(prompt_tokens - cached_tokens) * input_per_mtok / 1e6 + "
+            "cached_tokens * cache_hit_input_per_mtok / 1e6 + completion_tokens * "
+            "output_per_mtok / 1e6`；金额保留 4 位小数，`reasoning_tokens` 已包含在 "
+            "`completion_tokens` 中，不重复计费。"
+        )
+        lines.append(f"- 价格快照来源：`{pricing_source or '—'}`。")
+        for note in notes:
+            lines.append(f"- {note}")
+        lines.append("")
+        self.md["usage"] = lines
     # ------------------------------------------------------------------
     # Confusion matrices (main condition, free recognition = experiment 3)
     # ------------------------------------------------------------------
@@ -2467,7 +2984,7 @@ class _Reporter:
             lines.append("_没有实验三 free 识别行；跳过混淆矩阵。_")
             self.md["confusion"] = lines
             return
-        lines.append("### 6.1 主条件 free 识别混淆矩阵（实验三）")
+        lines.append("### 7.1 主条件 free 识别混淆矩阵（实验三）")
         lines.append("")
         lines.append("> 混淆矩阵文件：`confusion/exp3_{维度}_overall.csv`，逐 voice 见 "
                      "`confusion/exp3_{维度}_voice_{X}.csv`。下表列出 misclassification 的 "
@@ -2775,7 +3292,7 @@ class _Reporter:
             "detection_composition": detection_composition,
             "parse_failures": parse_stats,
         }
-        lines: list[str] = ["### 7.1 数据事实", ""]
+        lines: list[str] = ["### 8.1 数据事实", ""]
         if audio:
             lines.append(
                 "- 音频池：{} 条；voice 分布 {}；tone 分布 {}；采样率 {} Hz，声道 {}；"
@@ -2819,7 +3336,7 @@ class _Reporter:
                 )
             )
         if detection_composition:
-            lines.extend(["", "### 7.2 检测集构成", "", "| 子集 | neg | pos |", "| --- | --- | --- |"])
+            lines.extend(["", "### 8.2 检测集构成", "", "| 子集 | neg | pos |", "| --- | --- | --- |"])
             for subset, values in detection_composition.items():
                 lines.append(
                     f"| {subset} | {values.get('n_neg', 0)} | {values.get('n_pos', 0)} |"
@@ -2828,7 +3345,7 @@ class _Reporter:
             lines.extend(
                 [
                     "",
-                    "### 7.3 解析失败",
+                    "### 8.3 解析失败",
                     "",
                     "- 总行数 {}；解析成功 {}；失败 {}（失败率 {}）。".format(
                         parse_stats.get("n_total"),
@@ -2861,13 +3378,13 @@ class _Reporter:
         lines.extend(
             [
                 "",
-                "### 7.4 设计/任务说明",
+                "### 8.4 设计/任务说明",
                 "",
                 f"- {DESIGN_REVISION_NOTE}",
                 "- 检测指标均来自独立检测实验的 `detection_rows.parquet`（neg=一致样本，"
                 "pos=不一致变体），不再由实验一/二拼装；实验一/二只报告声调识别。",
                 "",
-                "### 7.5 模型 / 参数 / 版本",
+                "### 8.5 模型 / 参数 / 版本",
                 "",
                 "| 项目 | 值 |",
                 "| --- | --- |",
@@ -2916,55 +3433,47 @@ class _Reporter:
         lines.append("")
         rows: list[list[Any]] = []
         for experiment in EXPERIMENT_ORDER:
-            entry = self.headline.get(experiment)
-            if not entry:
+            entries = self.headline.get(experiment)
+            if not isinstance(entries, Mapping):
                 continue
-            for dim in RECOGNITION_DIMS:
-                accuracy = entry.get(f"{dim}_accuracy")
-                if accuracy is None:
-                    continue
-                rows.append(
-                    [
-                        experiment,
-                        DIMENSION_TITLES[dim],
-                        "accuracy",
-                        _fmt(accuracy),
-                        _fmt(entry.get(f"{dim}_macro_f1")),
-                        entry.get("n", 0),
-                        entry.get("n_failures", 0),
-                    ]
+            for prompt_condition, entry in entries.items():
+                prompt_title = PROMPT_CONDITION_TITLES.get(
+                    prompt_condition, prompt_condition
                 )
-            if entry.get("joint_accuracy") is not None:
-                rows.append(
-                    [
-                        experiment,
-                        DIMENSION_TITLES["joint"],
-                        "accuracy",
-                        _fmt(entry.get("joint_accuracy")),
-                        "—",
-                        entry.get("n", 0),
-                        entry.get("n_failures", 0),
-                    ]
-                )
-        for experiment in ("exp4", "exp5", "exp6"):
-            ab_entry = (self.headline.get("ab") or {}).get(experiment)
-            if not ab_entry:
-                continue
-            rows.append(
-                [
-                    experiment,
-                    "A/B",
-                    "accuracy",
-                    _fmt(ab_entry.get("accuracy")),
-                    "—",
-                    ab_entry.get("n", 0),
-                    ab_entry.get("n_failures", 0),
-                ]
-            )
+                for dim in RECOGNITION_DIMS:
+                    accuracy = entry.get(f"{dim}_accuracy")
+                    if accuracy is None:
+                        continue
+                    rows.append(
+                        [
+                            experiment,
+                            prompt_title,
+                            DIMENSION_TITLES[dim],
+                            "accuracy",
+                            _fmt(accuracy),
+                            _fmt(entry.get(f"{dim}_macro_f1")),
+                            entry.get("n", 0),
+                            entry.get("n_failures", 0),
+                        ]
+                    )
+                if entry.get("joint_accuracy") is not None:
+                    rows.append(
+                        [
+                            experiment,
+                            prompt_title,
+                            DIMENSION_TITLES["joint"],
+                            "accuracy",
+                            _fmt(entry.get("joint_accuracy")),
+                            "—",
+                            entry.get("n", 0),
+                            entry.get("n_failures", 0),
+                        ]
+                    )
         if rows:
             lines.extend(
                 _md_table(
-                    ["实验", "维度", "指标", "值", "Macro-F1", "n", "解析失败"], rows
+                    ["实验", "提示条件", "维度", "指标", "值", "Macro-F1", "n", "解析失败"],
+                    rows,
                 )
             )
         else:
@@ -3048,15 +3557,16 @@ class _Reporter:
             ("detection", "## 3. 检测实验（一致性检测：target + target_tone）"),
             ("ablation", "## 4. 消融（生成条件 × 子集）"),
             ("comparisons", "## 5. 条件对统计比较"),
-            ("confusion", "## 6. 混淆矩阵"),
-            ("appendix", "## 7. 附录"),
+            ("usage", "## 6. 成本与用量"),
+            ("confusion", "## 7. 混淆矩阵"),
+            ("appendix", "## 8. 附录"),
         ):
             body = self.md.get(key) or []
             sections.append(title)
             sections.append("")
             sections.extend(body)
             sections.append("")
-        sections.append("## 8. 工件清单")
+        sections.append("## 9. 工件清单")
         sections.append("")
         for name in sorted(self.artifacts):
             sections.append(f"- `{name}`")
@@ -3095,6 +3605,8 @@ class _Reporter:
             "baselines": self.baseline_rows,
             "comparisons": self.comparison_rows,
             "n_comparisons": len(self.comparison_rows),
+            "usage": self.usage_summary,
+            "cost": self.cost_summary,
             "ablation_conditions": [
                 key for key in self.condition_keys if key != self.main_key
             ],
@@ -3115,6 +3627,7 @@ class _Reporter:
         self._detection_results()
         self._ablation_results()
         self._comparison_results()
+        self._usage_results()
         self._confusion_results()
         self._appendix()
         self.md["summary"] = self._summary_section()
@@ -3123,6 +3636,7 @@ class _Reporter:
         self._write_csv(ABLATION_NAME, self.ablation_rows, ABLATION_COLUMNS)
         self._write_csv(COMPARISONS_NAME, self.comparison_rows, COMPARISON_COLUMNS)
         self._write_csv(BASELINES_NAME, self.baseline_rows, BASELINE_COLUMNS)
+        self._write_csv(USAGE_NAME, self.usage_rows, USAGE_COLUMNS)
         self._render_report()
         summary = self._build_summary()
         summary["artifacts"] = dict(self.artifacts)

@@ -11,8 +11,8 @@ import logging
 import subprocess
 import threading
 import time
-from collections.abc import Iterable, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Iterable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +21,7 @@ from typing import Any
 from .client import BaseClient, ChatRequest, ChatResponse, check_setup, create_client
 from .config import Config
 from .data.dataset import ensure_noisy_for
+from .pricing import Pricing, budget_status, extract_usage
 from .prompts import PROMPT_VERSION, describe_prompts
 from .records import GenerationRecord, TaskItem
 from .tasks import (
@@ -144,6 +145,29 @@ def build_request_plan(
     return sorted(plans.values(), key=lambda p: (p.condition_id, p.experiment, p.item_id, p.request_id))
 
 
+def filter_plans_by_generation(
+    plans: Sequence[RequestPlan],
+    subset_by_generation: Mapping[str, set[str]] | None,
+) -> list[RequestPlan]:
+    """Keep only plans whose item is allowed for their generation condition.
+
+    ``subset_by_generation`` maps a generation key (``think0__clean__json``) to
+    the set of allowed item ids.  Conditions missing from the mapping are not
+    filtered.  Used by the minimal design where the detection experiment runs
+    only under the main condition (v3: detection does not participate in
+    ablation).
+    """
+    if not subset_by_generation:
+        return list(plans)
+    kept: list[RequestPlan] = []
+    for plan in plans:
+        generation = plan.condition_id.split("__", 1)[1] if "__" in plan.condition_id else ""
+        allowed = subset_by_generation.get(generation)
+        if allowed is None or plan.item_id in allowed:
+            kept.append(plan)
+    return kept
+
+
 def plan_summary(plans: Sequence[RequestPlan]) -> dict[str, Any]:
     per_condition: dict[str, int] = {}
     for plan in plans:
@@ -203,6 +227,7 @@ def build_manifest(
     conditions: Sequence[dict[str, Any]],
     mock: bool,
     extra: dict[str, Any] | None = None,
+    budget_cny: float | None = None,
 ) -> dict[str, Any]:
     mapping_path = cfg.path("paths.mapping_csv")
     manifest: dict[str, Any] = {
@@ -219,6 +244,8 @@ def build_manifest(
             "config_name": cfg["dataset.config_name"],
             "mapping_csv_sha256": _sha256_file(mapping_path) if mapping_path.exists() else None,
         },
+        "pricing": Pricing.from_config(cfg).as_dict(),
+        "budget_cny": budget_cny,
         "model": {
             "name": cfg.model_name,
             "provider": cfg.get("model.provider"),
@@ -337,10 +364,13 @@ def run_generation(
     task_sources: Sequence[str] = (),
     item_subset_source: str | None = None,
     extra_manifest: dict[str, Any] | None = None,
+    max_cost_cny: float | None = None,
+    item_subset_by_generation: Mapping[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     if conditions is None:
         conditions = [cfg.main_condition]
     plans = build_request_plan(cfg, tasks, conditions, item_subset=item_subset)
+    plans = filter_plans_by_generation(plans, item_subset_by_generation)
     if limit is not None:
         # Keep at most N requests *per condition*, drawn as a deterministic
         # random sample: pilot runs with --limit must cover the whole condition
@@ -366,12 +396,16 @@ def run_generation(
     summary = plan_summary(plans)
     log.info("run plan: %s", summary)
 
+    pricing = Pricing.from_config(cfg)
+    budget_cny = max_cost_cny if max_cost_cny is not None else cfg.get("generation.budget_cny")
+    budget_cny = float(budget_cny) if budget_cny not in (None, "", 0) else None
+
     run_id = run_id or new_run_id(cfg, tag=tag or ("mock" if mock or dry_run else ""))
     run_dir = run_dir_for(cfg, run_id)
     manifest = build_manifest(
         cfg, run_id=run_id, plans=plans, task_sources=task_sources,
         item_subset_source=item_subset_source, conditions=conditions,
-        mock=mock or dry_run, extra=extra_manifest,
+        mock=mock or dry_run, extra=extra_manifest, budget_cny=budget_cny,
     )
     write_manifest(run_dir, manifest)
 
@@ -466,36 +500,99 @@ def run_generation(
             media_path=plan.media_rel,
         )
 
+    counters.update({
+        "prompt_tokens": 0,
+        "cached_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_cny": 0.0,
+        "n_skipped_budget": 0,
+    })
+    budget_stop = False
+    todo_iter = iter(todo)
+    executed = 0
+
     with generations_path.open("a", encoding="utf-8") as out_fh:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {pool.submit(_execute, plan): plan for plan in todo}
-            for future in as_completed(futures):
-                plan = futures[future]
-                try:
-                    response = future.result()
-                except Exception as exc:  # noqa: BLE001 - client should not raise, but be safe
-                    response = ChatResponse(
-                        request_id=plan.request_id, error=f"worker crash: {exc}",
+            inflight: dict[Any, RequestPlan] = {}
+
+            def _fill() -> None:
+                """Submit up to ``concurrency`` more requests (unless budget hit)."""
+                while len(inflight) < concurrency and not budget_stop:
+                    try:
+                        plan = next(todo_iter)
+                    except StopIteration:
+                        return
+                    inflight[pool.submit(_execute, plan)] = plan
+
+            _fill()
+            while inflight:
+                done, _pending = wait(inflight, return_when=FIRST_COMPLETED)
+                for future in done:
+                    plan = inflight.pop(future)
+                    executed += 1
+                    try:
+                        response = future.result()
+                    except Exception as exc:  # noqa: BLE001 - client should not raise
+                        response = ChatResponse(
+                            request_id=plan.request_id, error=f"worker crash: {exc}",
+                        )
+                    record = _record(plan, response)
+                    usage = extract_usage(record.usage)
+                    call_input_cost = pricing.input_cost(
+                        usage["prompt_tokens"], usage["cached_tokens"]
                     )
-                record = _record(plan, response)
-                with write_lock:
-                    out_fh.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
-                    out_fh.flush()
-                    counters["ok" if record.error is None else "error"] += 1
-                    total = counters["ok"] + counters["error"]
-                    if total % 100 == 0:
-                        log.info("progress %d/%d (ok=%d error=%d)",
-                                 total, len(todo), counters["ok"], counters["error"])
+                    call_output_cost = pricing.output_cost(usage["completion_tokens"])
+                    with write_lock:
+                        out_fh.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+                        out_fh.flush()
+                        counters["ok" if record.error is None else "error"] += 1
+                        counters["prompt_tokens"] += usage["prompt_tokens"]
+                        counters["cached_tokens"] += usage["cached_tokens"]
+                        counters["completion_tokens"] += usage["completion_tokens"]
+                        counters["reasoning_tokens"] += usage["reasoning_tokens"]
+                        counters["cost_cny"] += call_input_cost + call_output_cost
+                        total = counters["ok"] + counters["error"]
+                        if total % 100 == 0:
+                            log.info(
+                                "progress %d/%d (ok=%d error=%d cost=%.2f%s)",
+                                total, len(todo), counters["ok"], counters["error"],
+                                counters["cost_cny"],
+                                f"/{budget_cny:.2f}" if budget_cny else "",
+                            )
+                    if (
+                        budget_cny is not None
+                        and not budget_stop
+                        and counters["cost_cny"] >= budget_cny
+                    ):
+                        budget_stop = True
+                        log.warning(
+                            "cost budget reached: %.4f >= %.2f CNY; stopping new requests",
+                            counters["cost_cny"], budget_cny,
+                        )
+                _fill()
+
+    counters["n_skipped_budget"] = max(0, len(todo) - executed)
 
     elapsed = time.perf_counter() - started
-    manifest["status"] = "completed"
+    all_done = counters["n_skipped_budget"] == 0
+    manifest["status"] = "completed" if all_done else "budget_exceeded"
     manifest["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    budget = budget_status(counters["cost_cny"], budget_cny)
     manifest["counts"] = {
         "n_planned": len(plans),
         "n_skipped_resume": len(plans) - len(todo),
+        "n_skipped_budget": counters["n_skipped_budget"],
         "n_ok": counters["ok"],
         "n_error": counters["error"],
         "elapsed_s": round(elapsed, 1),
+        "n_calls": counters["ok"] + counters["error"],
+        "prompt_tokens": counters["prompt_tokens"],
+        "cached_tokens": counters["cached_tokens"],
+        "completion_tokens": counters["completion_tokens"],
+        "reasoning_tokens": counters["reasoning_tokens"],
+        "cost_cny": round(counters["cost_cny"], 6),
+        "budget": budget,
     }
     write_manifest(run_dir, manifest)
     log.info("run %s finished in %.1fs: %s", run_id, elapsed, manifest["counts"])
@@ -505,6 +602,140 @@ def run_generation(
         "dry_run": False,
         **summary,
         **manifest["counts"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pre-run cost estimation
+# ---------------------------------------------------------------------------
+
+
+def load_audio_durations(cfg: Config) -> dict[str, float]:
+    """audio_id -> duration seconds, from the prepared audio manifest (best effort)."""
+    path = cfg.path("paths.manifest_dir") / "audio.parquet"
+    if not path.exists():
+        return {}
+    try:
+        import pandas as pd
+
+        df = pd.read_parquet(path, columns=["audio_id", "duration_s"])
+        return {str(a): float(d) for a, d in zip(df["audio_id"], df["duration_s"], strict=False)}
+    except Exception:  # noqa: BLE001 - estimation must never break the CLI
+        return {}
+
+
+def estimate_plan_cost(cfg: Config, plans: Sequence[RequestPlan]) -> dict[str, Any]:
+    """Estimate token usage and CNY cost of a plan before spending money.
+
+    Two estimates are reported:
+
+    * ``expected``     — expected prompt chars/token ratio (0.7) and expected
+      thinking output tokens (``pricing.assumed_output_tokens_on``);
+    * ``conservative`` — 1 token per prompt character and high thinking output
+      tokens (``pricing.assumed_output_tokens_on_high``).
+
+    Audio input tokens use the official rule ``ceil(duration_s) * 7``.  These are
+    *estimates*; actual cost always comes from the API ``usage`` (see
+    :mod:`pinyin_eval.pricing`).
+    """
+    pricing = Pricing.from_config(cfg)
+    durations = load_audio_durations(cfg)
+    fallback_duration = 0.65
+    # model.max_output_tokens caps completion tokens (incl. reasoning), which
+    # also caps the worst-case output cost per call.
+    max_output_tokens = int(cfg.get("model.max_output_tokens", 256) or 256)
+
+    by_condition: dict[str, dict[str, Any]] = {}
+    totals: dict[str, float] = {
+        "n_requests": 0,
+        "expected_cost_cny": 0.0,
+        "conservative_cost_cny": 0.0,
+        "worst_case_cost_cny": 0.0,
+        "prompt_tokens_expected": 0,
+        "prompt_tokens_conservative": 0,
+        "output_tokens_expected": 0,
+        "output_tokens_conservative": 0,
+    }
+    for plan in plans:
+        duration = durations.get(plan.audio_id, fallback_duration)
+        system_prompt = plan.system_prompt or ""
+        prompt_cons = pricing.estimate_prompt_tokens(
+            system_prompt, plan.prompt_text, duration, mode="conservative"
+        )
+        prompt_exp = pricing.estimate_prompt_tokens(
+            system_prompt, plan.prompt_text, duration, mode="expected"
+        )
+        output_exp = min(
+            pricing.assumed_output_tokens(plan.thinking, high=False), max_output_tokens
+        )
+        output_cons = min(
+            pricing.assumed_output_tokens(plan.thinking, high=True), max_output_tokens
+        )
+        cost_exp = pricing.input_cost(prompt_exp) + pricing.output_cost(output_exp)
+        cost_cons = pricing.input_cost(prompt_cons) + pricing.output_cost(output_cons)
+        cost_worst = pricing.input_cost(prompt_cons) + pricing.output_cost(max_output_tokens)
+
+        totals["n_requests"] += 1
+        totals["expected_cost_cny"] += cost_exp
+        totals["conservative_cost_cny"] += cost_cons
+        totals["prompt_tokens_expected"] += prompt_exp
+        totals["prompt_tokens_conservative"] += prompt_cons
+        totals["output_tokens_expected"] += output_exp
+        totals["output_tokens_conservative"] += output_cons
+        totals["worst_case_cost_cny"] += cost_worst
+
+        cond = by_condition.setdefault(plan.condition_id, {
+            "condition_id": plan.condition_id,
+            "prompt_condition": plan.prompt_condition,
+            "thinking": plan.thinking,
+            "audio_quality": plan.audio_quality,
+            "output_form": plan.output_form,
+            "n_requests": 0,
+            "expected_cost_cny": 0.0,
+            "conservative_cost_cny": 0.0,
+            "worst_case_cost_cny": 0.0,
+        })
+        cond["n_requests"] += 1
+        cond["expected_cost_cny"] += cost_exp
+        cond["conservative_cost_cny"] += cost_cons
+        cond["worst_case_cost_cny"] += cost_worst
+
+    for cond in by_condition.values():
+        cond["expected_cost_cny"] = round(cond["expected_cost_cny"], 6)
+        cond["conservative_cost_cny"] = round(cond["conservative_cost_cny"], 6)
+        cond["worst_case_cost_cny"] = round(cond["worst_case_cost_cny"], 6)
+
+    n = max(1, int(totals["n_requests"]))
+    budget_cny = cfg.get("generation.budget_cny")
+    budget_cny = float(budget_cny) if budget_cny not in (None, "", 0) else None
+    return {
+        "n_requests": int(totals["n_requests"]),
+        "expected_cost_cny": round(totals["expected_cost_cny"], 6),
+        "conservative_cost_cny": round(totals["conservative_cost_cny"], 6),
+        "worst_case_cost_cny": round(totals["worst_case_cost_cny"], 6),
+        "expected_cost_per_call_cny": round(totals["expected_cost_cny"] / n, 8),
+        "conservative_cost_per_call_cny": round(totals["conservative_cost_cny"] / n, 8),
+        "worst_case_cost_per_call_cny": round(totals["worst_case_cost_cny"] / n, 8),
+        "max_output_tokens_cap": max_output_tokens,
+        "prompt_tokens_expected": int(totals["prompt_tokens_expected"]),
+        "prompt_tokens_conservative": int(totals["prompt_tokens_conservative"]),
+        "output_tokens_expected": int(totals["output_tokens_expected"]),
+        "output_tokens_conservative": int(totals["output_tokens_conservative"]),
+        "by_condition": {k: v for k, v in sorted(by_condition.items())},
+        "budget": {
+            "budget_cny": budget_cny,
+            "within_conservative_budget": (
+                None if budget_cny is None else totals["conservative_cost_cny"] <= budget_cny
+            ),
+            "conservative_used_fraction": (
+                None if budget_cny is None
+                else round(totals["conservative_cost_cny"] / budget_cny, 4)
+            ),
+            "within_worst_case_budget": (
+                None if budget_cny is None else totals["worst_case_cost_cny"] <= budget_cny
+            ),
+        },
+        "pricing": pricing.as_dict(),
     }
 
 
@@ -535,6 +766,9 @@ def resume_ok(planned_path: Path) -> bool:
 
 __all__ = [
     "GENERATIONS_NAME",
+    "estimate_plan_cost",
+    "filter_plans_by_generation",
+    "load_audio_durations",
     "PLANNED_CALLS_NAME",
     "MANIFEST_NAME",
     "PLAN_NAME",

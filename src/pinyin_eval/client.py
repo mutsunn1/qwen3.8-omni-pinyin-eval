@@ -184,6 +184,12 @@ class MockClient(BaseClient):
             if request.output_form == "json":
                 return json.dumps({"consistent": consistent, "tone": gold_tone})
             return f"一致性={'一致' if consistent else '不一致'}\n声调={gold_tone}"
+        if kind in ("initial", "final"):
+            value = gold_initial if kind == "initial" else gold_final
+            if request.output_form == "json":
+                return json.dumps({kind: value}, ensure_ascii=False)
+            marker = "声母" if kind == "initial" else "韵母"
+            return f"{marker}={value}"
         if kind == "free":
             if request.output_form == "json":
                 return json.dumps(

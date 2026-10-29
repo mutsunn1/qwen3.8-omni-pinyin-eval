@@ -18,12 +18,14 @@
 6160 条 16 kHz 单声道 WAV；4 个 TTS voice × 1540；声调 1–4 各 1540）。
 模型：阿里云百炼 **Qwen3.8-Omni-Flash**（`qwen3.8-omni-flash`）。
 
-> 当前状态：框架已按 **2026-10-28 v2 设计更新**（实验一/二只评声调、新增检测实验、
-> 新增 Prompt 模板章节）实现，离线测试全绿；`all-mock` 可在无 API key 的情况下跑通
+> 当前状态：框架已按 **2026-10-28 v3 设计更新**（实验一/二只评声调、新增独立检测实验、
+> 取消 A/B、实验四~六改为三个子实验、检测实验不参与消融）实现，离线测试全绿；
+> `all-mock` 可在无 API key 的情况下跑通
 > `prepare-data → build-tasks → generate(mock) → score → report` 全链路。
 > 真实 API 调用尚未执行（本机未配置 `DASHSCOPE_API_KEY` / 业务空间 `DASHSCOPE_BASE_URL`）。
-> v2 设计变更对应 Obsidian 设计文档 git commits `f4caf99` / `eb5cbe8`（2026-10-28），
-> 快照见 `docs/experiment-design.md`。
+> 设计快照：`docs/experiment-design.md`（v3, 2026-10-28 20:37）。
+> **另有 ¥70 预算的最小化实验设计**：[docs/experiment-design-minimal.md](docs/experiment-design-minimal.md)
+> （4 个生成条件、59,968 次调用、预期 ¥19 / 最坏 ¥50，硬预算 70；见 §2.1）。
 
 ---
 
@@ -41,7 +43,7 @@ scripts/setup.sh            # 或 make setup：uv sync --locked + 生成 .env + 
 # 编辑 .env 填入 DASHSCOPE_API_KEY / DASHSCOPE_BASE_URL（只跑 mock 时可留空）
 
 make mock                   # 离线全链路自测：prepare-data → build-tasks → generate(mock) → score → report
-make test                   # 238 个离线测试
+make test                   # 269 个离线测试
 make lint                   # ruff
 ```
 
@@ -78,7 +80,7 @@ uv run pinyin-eval all-mock --audios 40   # 离线全链路自测（mock client�
 #   DASHSCOPE_BASE_URL=https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 
 uv run pinyin-eval smoke                    # 1 次真实调用，验证 key / 模型 id / base_url
-uv run pinyin-eval estimate --tasks all --profile main      # 预估主实验调用量（107,896 次）
+uv run pinyin-eval estimate --tasks all --profile main      # 预估主实验调用量（126,704 次）
 uv run pinyin-eval generate --tasks all --profile main      # 主实验全量
 uv run pinyin-eval generate --tasks all --profile ablation --conditions all   # 消融
 uv run pinyin-eval score --run-id <主实验 run_id>
@@ -87,11 +89,37 @@ uv run pinyin-eval report --run-id <主实验 run_id>
 
 设计文档的调用预算（已用 `estimate` 实测，含请求去重）：
 
-| 阶段 | 数据 | 条件数 | API 调用 |
-|---|---|---:|---:|
-| 主实验 | 全量 6160 音频 + 检测实验 + 全部最小对 | 1（`think1/clean/json`） | 107,896 |
-| 消融 | 固定子集（core 768 + detection 1,536 + pairs 10,752 条任务） | 8 | 96,960 |
-| 合计 | — | — | **204,856** |
+| 阶段 | 数据 | 条件数 | API 调用 | 预计成本（expected / worst） |
+|---|---|---:|---:|---:|
+| 主实验 | 全量 6160 音频 + 检测实验 + 全部最小对 | 1（`think1/clean/json`） | 126,704 | ¥101.3 / ¥106.7 |
+| 消融 | 固定子集（core 768 + pairs 8,448 条任务；**检测不参与消融**） | 8 | 85,872 | ¥41.5 / ¥70.9 |
+| 合计 | — | — | **212,576** | **¥142.8 / ¥177.6** |
+
+> 成本按 `qwen3.8-omni-flash` 华北2 价格（输入 ¥0.8/M、输出 ¥2.7/M，音频 7 token/秒）
+> 与 `max_tokens=256` 上限估算，详见 `pinyin_eval.pricing` 与 `pinyin-eval estimate`。
+> **如果预算只有 ¥70，请直接使用 §2.1 的最小化实验设计。**
+
+### 2.1 最小化实验设计（¥70 预算，推荐先跑）
+
+完整设计约需 21.3 万次调用（预期 ¥143）。如果先做 pilot / 预算 ≤¥70，用
+[最小化设计](docs/experiment-design-minimal.md) + `configs/minimal.yaml`：
+
+```bash
+uv run pinyin-eval --config configs/minimal.yaml build-tasks --minimal
+uv run pinyin-eval --config configs/minimal.yaml estimate --tasks all --profile minimal --conditions minimal
+uv run pinyin-eval --config configs/minimal.yaml generate --tasks all --profile minimal \
+  --conditions minimal --run-id mini-v1 --tag minimal     # 59,968 次调用
+uv run pinyin-eval --config configs/minimal.yaml score  --run-id mini-v1
+uv run pinyin-eval --config configs/minimal.yaml report --run-id mini-v1
+uv run pinyin-eval --config configs/minimal.yaml cost   --run-id mini-v1
+```
+
+* 数据：1,536 条分层音频（96 target × 4 voice × 4 tone）+ 7 类最小对各 48 实例；
+* 条件：C1 主条件（think off/clean/JSON，唯一运行检测实验的条件）+ 3 个单因素消融
+  （think on / SNR 20 dB 噪声 / 自由文本）；
+* 预算：预期 ¥18.9、保守 ¥21.3、**理论最坏 ¥50.1**，`generation.budget_cny=70` 兜底；
+* 定位：pilot / 可行性级结论（总体 CI ≈ ±2.5%）；可选档位 64/32（1,024 音频 / ¥12.5–33.3）或
+  128/64（2,048 音频 / ¥25.0–66.6），详见最小化设计文档 §3.5。
 
 > 模型参数、prompt 版本、数据集 commit、mapping sha256、条件网格都会写入
 > `results/runs/<run_id>/run_manifest.json`；预测按 `request_id` 去重后逐条落盘，
@@ -106,7 +134,7 @@ data/raw/*.parquet ──prepare-data──> data/audio/**/*.wav + data/manifest
                                                ▼
                 data/manifests/tasks/core.jsonl      # 实验一/二/三视图（tone/tone/free）
                 data/manifests/tasks/detection.jsonl # 检测实验（target+target_tone → consistent）
-                data/manifests/tasks/pairs.jsonl     # 实验四/五/六视图（最小对，A/B 等）
+                data/manifests/tasks/pairs.jsonl     # 实验四/五/六（自由/正确信息/错误信息 三子实验）
                 data/manifests/tasks/detection_sets.csv
                 data/manifests/tasks/ablation_*_items.txt
                                                │
@@ -142,35 +170,36 @@ prompt 不提示 target 有误），实验三是自由识别；检测实验是�
 * 所有检测指标以 audio 聚类 bootstrap；检测实验本身的生成条件网格为 8 个
   （thinking/quality/form），提示固定。
 
-### 3.2 实验四 ~ 六（最小对）
+### 3.2 实验四 ~ 六（最小对，三子实验）
 
 由映射表构造 2440 对最小对立对、11824 个 (pair × voice × tone) 实例（与设计文档计数表
 逐项一致，`build-tasks --validate` 会断言）：
 
 | 类别 | 对 / 实例 | 实验 |
 |---|---:|---|
-| 平翘舌 z/zh, c/ch, s/sh（排除 -i 组） | 36 / 576 | 四（声母） |
+| 平翘舌 z/zh, c/ch, s/sh（排除 -i 组） | 36 / 576 | 四（声母 initial） |
 | 送气 b/p, d/t, g/k, j/q | 67 / 1072 | 四 |
 | n/l | 21 / 336 | 四 |
-| 前后鼻 an/ang, en/eng, in/ing | 40 / 640 | 五（韵母） |
+| 前后鼻 an/ang, en/eng, in/ing | 40 / 640 | 五（韵母 final） |
 | i/ü | 5 / 80 | 五 |
 | ian/üan | 3 / 48 | 五 |
-| 声调 6 对 | 2268 / 9072 | 六（声调） |
+| 声调 6 对 | 2268 / 9072 | 六（声调 tone） |
 
-每条音频跑 4 个提示条件：自由识别（free）/ 正确目标（tone）/ 错误目标（tone，仅 exp4/5）/
-A/B 二选一。exp6 的声调对两侧无调 target 相同，v2 prompt 无法表达“错误目标”，因此只跑
-free / correct_target / A/B 三个条件（见 `docs/decisions.md`）。主指标分别为 exp4 Initial、
-exp5 Final、exp6 Tone 的 free 条件准确率，A/B 准确率单独报告（随机基线 50%）。
+每条音频跑 **3 个子实验**：自由检测（无目标信息）/ 正确信息（给 target_initial、
+target_final、target_tone，全部正确）/ 错误信息（只改对应维度：exp4 改 initial、
+exp5 改 final、exp6 改 tone）。每个子实验只输出该实验维度（exp4 `{"initial"}`、
+exp5 `{"final"}`、exp6 `{"tone"}`）。**v3 已取消 A/B 任务。** 主指标为各实验对应维度
+在 3 个子实验下的准确率。
 
 ### 3.3 消融
 
 * 全因子：`思考 {on,off} × 音频 {clean, noise_20db(SNR 20 dB 加性白噪声)} × 输出 {json,text}`。
-* 提示条件也作为因子：实验一~三 3 水平、实验四~六 4 水平（exp6 3 水平，见上）；
-  检测实验提示固定，只有 8 个生成条件。
-* 每个提示条件/任务固定 256 条消融子样本（4 voice × 4 tone × 16 条）；检测实验保留
-  256 个音频的全部 6 个任务（1,536 条）以保证 main/typed 检测子集都可算；最小对按
-  pair_type 抽到 256 个实例（i/ü 80、ian/üan 48 全取）。同一子集的 8 个生成条件彼此配对。
-* 噪声变体缓存于 `data/noisy/{audio_id}__snr20db.wav`（确定性随机种子，16 kHz PCM16）。
+* 提示条件作为因子：实验一~三 3 水平（自由检测/正确信息/错误信息）→ 24 个条件；
+  实验四~六每个实验 3 个子实验 × 8 = 24，3 个实验共 72 个条件。
+* **检测实验不参与消融**（v3）：只在主条件运行一次。
+* 每个条件固定子集：core 768 条任务、pairs 8,448 条任务；同一子集的 8 个生成条件
+  彼此配对。噪声变体缓存于 `data/noisy/{audio_id}__snr20db.mp3/wav`
+  （确定性种子，16 kHz PCM16）。
 
 ## 4. 指标与统计
 
@@ -182,11 +211,11 @@ exp5 Final、exp6 Tone 的 free 条件准确率，A/B 准确率单独报告（�
 | EP / ER / Error-F1 | TP/(TP+FP)、TP/(TP+FN)、2PR/(P+R) | 检测实验（正类=不一致） |
 | FPR / FNR | FP/(FP+TN)、FN/(FN+TP) | 检测实验 |
 | Confusion Matrix | 具体混淆对 | 全部识别维度 |
-| A/B Accuracy | 二选一准确率（随机基线 50%） | 实验四~六 |
+| 成本 / 用量 | token、reasoning token、CNY 花费、预算状态 | 全部 run（`usage.csv`、`pinyin-eval cost`） |
 
 * 95% CI：bootstrap 2000 次，以 audio 为聚类单位、voice 为分层变量（设计文档要求）。
 * 条件比较：同一批样本上的 McNemar 检验 + 配对 bootstrap 差值 CI；多重比较用 Holm 校正。
-* 基线：声调 25%、A/B 50%、平衡检测集 50%、initial/final 多数类基线。
+* 基线：声调四分类 25%、平衡检测集 50%、initial/final 多数类基线（v3 已无 A/B 基线）。
 * 解析失败（无法解析 / 拒答 / 空回复 / API 错误）单独计入 `n_failures` 并报告比例，
   不进指标分母。设计文档中的 τ=0.5 仅适用于模型输出概率的判定；本项目要求模型输出
   类别判断（`consistent: true/false`），因此 τ 不参与计算，详见 `docs/decisions.md`。
@@ -194,7 +223,9 @@ exp5 Final、exp6 Tone 的 free 条件准确率，A/B 准确率单独报告（�
 ## 5. 仓库结构
 
 ```
-configs/base.yaml              # 数据/模型/任务/统计全部参数（唯一配置源）
+configs/base.yaml              # 完整设计配置（数据/模型/任务/统计/计费）
+configs/minimal.yaml           # ¥70 最小化设计配置（继承 base）
+docs/experiment-design-minimal.md  # 最小化实验设计（v3, ¥70 预算）
 docs/experiment-design.md      # 设计文档冻结快照
 docs/contracts.md              # 模块间冻结契约（数据结构、函数签名、计数验收）
 docs/decisions.md              # 关键决策与设计文档歧义的处理记录
@@ -202,10 +233,10 @@ docs/runbook.md                # 正式实验运行手册（含附录模板）
 docs/schemas.md                # 数据产物 schema（manifest / items / detection）
 src/pinyin_eval/
   config.py normalize.py records.py prompts.py parsing.py client.py runner.py
-  scoring.py cli.py
+  scoring.py pricing.py cli.py
   data/dataset.py data/minimal_pairs.py
   metrics.py stats.py report.py tasks.py
-tests/                         # 238 个离线测试（无网络/无 key）
+tests/                         # 269 个离线测试（无网络/无 key）
 ```
 
 ## 6. 模型调用细节（百炼 OpenAI 兼容接口）
@@ -214,8 +245,11 @@ tests/                         # 238 个离线测试（无网络/无 key）
   共用 system prompt 取自设计文档 v2 §五；
 * 音频以 `{"type":"input_audio","input_audio":{"data":"data:audio/wav;base64,...","format":"wav"}}` 传入；
 * 结构化输出用 `response_format={"type":"json_object"}`（JSON 条件）；
-* 输出 schema：tone `{"tone"}`、free `{"initial","final","tone"}`、detect `{"consistent"}`、
-  A/B `{"choice"}`；自由文本标记：`声调=`、`声母=…；韵母=…；声调=`、`一致=是/否`、`选择=A/B`；
+* 输出 schema（v3）：tone `{"tone"}`、free `{"initial","final","tone"}`、
+  initial `{"initial"}`、final `{"final"}`、detect `{"consistent"}`；
+  自由文本标记：`声调=`、`声母=`、`韵母=`、`声母=…；韵母=…；声调=`、`一致=是/否`；
+* 成本：每次调用 usage 记入 `generations.jsonl`；`pinyin-eval cost --run-id` 汇总
+  token/成本；`generation.budget_cny` / `--max-cost` 为硬预算，达到后停止新请求；
 * 思考模式：Qwen3.8-Omni 默认开启思考；关闭时发送 `reasoning_effort="none"`；
   开启时不额外发送参数（使用模型默认力度），均记录在 `run_manifest.json`；
 * 固定解码参数：`temperature=0, top_p=1, max_tokens=256`；
@@ -237,7 +271,7 @@ tests/                         # 238 个离线测试（无网络/无 key）
 ## 8. 测试
 
 ```bash
-uv run pytest                 # 238 passed（离线）
+uv run pytest                 # 269 passed（离线）
 uv run ruff check src tests   # All checks passed
 ```
 
@@ -255,11 +289,12 @@ uv run ruff check src tests   # All checks passed
   只需调整 `configs/base.yaml` 的 `model.*` 与 `client.py` 的 `build_payload`。
 * 预算估计未计入 token 价格：`estimate` 只统计调用次数；成本需按百炼 Omni 定价另算
   （每条 ~0.2k 提示 token + ~0.6s 音频）。
-* 最小对实验中 exp4/5/6 的 target-condition 提示沿用实验一/二的“只报声调” schema，
-  设计文档“实验×指标矩阵”中 exp4 Initial / exp5 Final / exp6 Tone 的 ✓ 对应 free 条件；
-  exp6 无法构造 wrong-target（两侧无调 target 相同），只有 3 个提示条件。
+* 实验四/五/六为 v3 的三子实验（自由/正确信息/错误信息），输出对应维度；
+  不再有 A/B 任务。
 * 实验二的 5 个错误无调变体按“2+2+1（额外改声母或韵母）”实现；若设计意图不同，
   调整 `configs/base.yaml: tasks.exp2` 后重新 `build-tasks` 即可。
+* 成本估算依赖 token 假设：`pinyin-eval estimate` 同时给出 expected / conservative /
+  worst-case（受 `max_tokens=256` 约束）三档；实际成本以 API `usage` 为准。
 * `--include-wide-nasal` 可把 ian/iang、uan/uang 纳入前后鼻最小对（52 对），
   但会偏离设计文档的 40 对口径，默认关闭。
 

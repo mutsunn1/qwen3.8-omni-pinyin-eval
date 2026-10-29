@@ -21,9 +21,12 @@ from typing import Any
 
 from .normalize import (
     MappingEntry,
+    normalize_final,
+    normalize_initial,
     normalize_output_pair,
     normalize_tone,
     normalize_toneless_string,
+    split_syllable,
 )
 
 REFUSAL_PATTERNS = (
@@ -76,6 +79,26 @@ class OutputNormalizer:
 
     def normalize_pair(self, initial: str | None, final: str | None) -> tuple[str, str]:
         return normalize_output_pair(initial, final, self.mapping)
+
+    def normalize_initial_only(self, value: str | None) -> str:
+        """Normalise a predicted initial (exp4): y/w and full syllables -> initial."""
+        initial = normalize_initial(value)
+        if initial in {"y", "w"}:
+            return ""  # y/w are not initials (zero-initial spellings)
+        if len(initial) > 2 or (len(initial) == 2 and initial not in {"zh", "ch", "sh"}):
+            split_initial, _final = split_syllable(initial)
+            if split_initial:
+                return split_initial
+        return initial
+
+    def normalize_final_only(self, value: str | None) -> str:
+        """Normalise a predicted final (exp5); full syllables are split first."""
+        known_finals = {entry.final for entry in self.mapping.values()}
+        final = normalize_final(value)
+        if final in known_finals:
+            return final
+        _initial, split_final = normalize_output_pair("", value, self.mapping)
+        return split_final or final
 
     @staticmethod
     def normalize_tone(value: object) -> int | None:
@@ -219,6 +242,48 @@ def _parse_tone_text(text: str, normalizer: OutputNormalizer) -> ParsedPredictio
     return ParsedPrediction("ok", tone=tone)
 
 
+def _parse_initial_json(obj: dict[str, Any], normalizer: OutputNormalizer) -> ParsedPrediction:
+    raw_initial = _lookup(obj, INITIAL_ALIASES)
+    initial = normalizer.normalize_initial_only(
+        str(raw_initial) if raw_initial is not None else ""
+    )
+    if raw_initial is None:
+        return ParsedPrediction("parse_error", reason="missing initial field")
+    return ParsedPrediction("ok", initial=initial)
+
+
+def _parse_initial_text(text: str, normalizer: OutputNormalizer) -> ParsedPrediction:
+    initial_text = _extract_marker_value(text, "声母")
+    if initial_text is None:
+        match = re.search(r"声母[^\n：:=]{0,6}[：:=]?\s*([^\n，,。;；]*)", text)
+        initial_text = match.group(1).strip() if match else None
+    if initial_text is None:
+        return ParsedPrediction("parse_error", reason="missing 声母 marker")
+    initial = normalizer.normalize_initial_only(initial_text)
+    return ParsedPrediction("ok", initial=initial)
+
+
+def _parse_final_json(obj: dict[str, Any], normalizer: OutputNormalizer) -> ParsedPrediction:
+    raw_final = _lookup(obj, FINAL_ALIASES)
+    final = normalizer.normalize_final_only(
+        str(raw_final) if raw_final is not None else ""
+    )
+    if raw_final is None:
+        return ParsedPrediction("parse_error", reason="missing final field")
+    return ParsedPrediction("ok", final=final)
+
+
+def _parse_final_text(text: str, normalizer: OutputNormalizer) -> ParsedPrediction:
+    final_text = _extract_marker_value(text, "韵母")
+    if final_text is None:
+        match = re.search(r"韵母[^\n：:=]{0,6}[：:=]?\s*([^\n，,。;；]*)", text)
+        final_text = match.group(1).strip() if match else None
+    if final_text is None:
+        return ParsedPrediction("parse_error", reason="missing 韵母 marker")
+    final = normalizer.normalize_final_only(final_text)
+    return ParsedPrediction("ok", final=final)
+
+
 def _parse_detect_json(obj: dict[str, Any], normalizer: OutputNormalizer) -> ParsedPrediction:
     raw_consistent = _lookup(obj, CONSISTENT_ALIASES)
     consistent = _parse_bool(raw_consistent)
@@ -283,44 +348,6 @@ def _parse_free_text(text: str, normalizer: OutputNormalizer) -> ParsedPredictio
     return ParsedPrediction("ok", initial=initial_s, final=final_s, tone=tone)
 
 
-def _parse_ab_json(obj: dict[str, Any]) -> ParsedPrediction:
-    raw_choice = _lookup(obj, CHOICE_ALIASES)
-    choice = _normalise_choice(raw_choice)
-    if choice is None:
-        return ParsedPrediction("parse_error", reason="missing/invalid choice")
-    return ParsedPrediction("ok", choice=choice)
-
-
-def _parse_ab_text(text: str) -> ParsedPrediction:
-    raw = _extract_marker_value(text, "选择")
-    if raw is None:
-        match = re.search(r"选择[^\nABab]{0,8}([ABab])", text)
-        raw = match.group(1) if match else None
-    if raw is None:
-        match = re.search(r"\b([AB])\b", text)
-        raw = match.group(1) if match else None
-    choice = _normalise_choice(raw)
-    if choice is None:
-        return ParsedPrediction("parse_error", reason="missing choice")
-    return ParsedPrediction("ok", choice=choice)
-
-
-def _normalise_choice(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip().upper()
-    if text in {"A", "B"}:
-        return text
-    match = re.search(r"\b([AB])\b", text) if len(text) <= 8 else None
-    if match:
-        return match.group(1)
-    if text in {"甲", "选项甲"}:
-        return "A"
-    if text in {"乙", "选项乙"}:
-        return "B"
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -329,14 +356,16 @@ def _normalise_choice(value: Any) -> str | None:
 JSON_PARSERS = {
     "free": _parse_free_json,
     "tone": _parse_tone_json,
+    "initial": _parse_initial_json,
+    "final": _parse_final_json,
     "detect": _parse_detect_json,
-    "ab": _parse_ab_json,
 }
 TEXT_PARSERS = {
     "free": _parse_free_text,
     "tone": _parse_tone_text,
+    "initial": _parse_initial_text,
+    "final": _parse_final_text,
     "detect": _parse_detect_text,
-    "ab": _parse_ab_text,
 }
 
 
@@ -361,12 +390,12 @@ def parse_prediction(
         parser = JSON_PARSERS.get(task_type)
         if parser is None:
             raise ValueError(f"unknown task_type {task_type!r}")
-        return parser(obj, normalizer) if task_type != "ab" else parser(obj)
+        return parser(obj, normalizer)
     if output_form == "text":
         parser = TEXT_PARSERS.get(task_type)
         if parser is None:
             raise ValueError(f"unknown task_type {task_type!r}")
-        parsed = parser(raw, normalizer) if task_type != "ab" else parser(raw)
+        parsed = parser(raw, normalizer)
         if not parsed.ok and _looks_refused(raw):
             parsed.status = "refused"
             parsed.reason = parsed.reason or "refusal-like text"

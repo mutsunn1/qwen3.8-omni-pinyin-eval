@@ -24,13 +24,13 @@
 
 ## 2. `data/manifests/tasks/*.jsonl`
 
-三个任务目录（2026-10-28 v2）：
+三个任务目录（2026-10-28 v3）：
 
 | 文件 | 内容 | 实验视图 |
 |---|---|---|
 | `core.jsonl` | 43,056 条：free + correct_target(tone) + wrong_target(tone) × 5 变体 | 实验一/二/三 |
-| `detection.jsonl` | 36,896 条：每音频 1 一致 + 2 改声母 + 2 改韵母 + 1 改声调（task_type=detect） | 检测实验 |
-| `pairs.jsonl` | 76,448 条：最小对实例的 free/correct_target/wrong_target(仅 exp4/5)/ab_choice | 实验四/五/六 |
+| `detection.jsonl` | 36,896 条：每音频 1 一致 + 2 改声母 + 2 改韵母 + 1 改声调（task_type=detect） | 检测实验（仅主条件） |
+| `pairs.jsonl` | 70,944 条：最小对实例每条音频 3 个子实验（free / correct_target / wrong_target，无 A/B） | 实验四/五/六 |
 
 `TaskItem` 字段（省略 `None` 等价空值）：
 
@@ -38,14 +38,15 @@
 |---|---|
 | item_id | 确定性 ID；核心任务 `exp1\|correct_target\|{audio_id}`，检测实验 `detect\|detect\|{audio_id}[\|变体]`，最小对任务带 `\|{pair_id}` 后缀 |
 | experiment | `exp1` / `exp2` / `exp3` / `detect` / `exp4`..`exp6`（分析视图） |
-| prompt_condition | `free` / `correct_target` / `wrong_target` / `detect` / `ab_choice` |
-| task_type | 输出 schema：`free` / `tone` / `detect` / `ab` |
+| prompt_condition | `free`（自由检测）/ `correct_target`（正确信息）/ `wrong_target`（错误信息）/ `detect` |
+| task_type | 输出 schema：`free` / `tone` / `initial` / `final` / `detect`（v3 无 ab） |
 | audio_id / wav_path / voice | 音频与 voice |
 | gold_initial / gold_final / gold_tone | 金标（永远描述音频） |
 | cluster_id | bootstrap 聚类单位 = audio_id |
 | pair_id / pair_type / pair_side | 最小对任务专用 |
 | variant_type / variant_index | 错误变体类型（initial/final/tone；实验二只有 initial/final）与序号 |
-| given_target / given_tone | 提示中"声称"的读音（无调拼音 / 带调） |
+| given_target / given_tone | 无调目标 / target_tone（实验一/二、检测实验） |
+| given_initial / given_final | v3 实验四~六目标信息（正确/错误信息子实验） |
 | consistent_gold | 目标条件下的金标一致性 |
 | alternatives / correct_choice | A/B 任务候选（带声调数字）与正确项 |
 | stratum | `voice\|tone`，消融分层用 |
@@ -74,8 +75,10 @@
 每行一个 `item_id`：
 
 * `ablation_core_items.txt`：3 个提示条件 × 256 条 = 768 条；
-* `ablation_detection_items.txt`：256 个音频 × 全部 6 个检测任务 = 1,536 条；
-* `ablation_pairs_items.txt`：按 pair_type 选中的最小对实例的全部任务（10,752 条）。
+* `ablation_pairs_items.txt`：按 pair_type 选中的最小对实例的全部任务（8,448 条）；
+* v3 无 `ablation_detection_items.txt`（检测实验不参与消融）。
+* 最小化设计另有：`minimal_items.txt`、`minimal_no_detection_items.txt`、
+  `minimal_{core,detection,pair}_items.txt`、`minimal_summary.json`。
 
 ## 6. `results/runs/<run_id>/run_manifest.json`
 
@@ -86,6 +89,9 @@
 | run_id / created_at / finished_at / status | 运行元信息 |
 | git_commit / config_sha256 / config | 代码与配置快照 |
 | dataset | hf_repo / hf_revision / mapping_csv_sha256 |
+| pricing / budget_cny | 计费快照（输入/输出/缓存单价、音频 token 规则）与硬预算 |
+| counts | n_planned / n_skipped_resume / n_skipped_budget / n_ok / n_error / n_calls /
+  prompt_tokens / cached_tokens / completion_tokens / reasoning_tokens / cost_cny / budget |
 | model | name / provider / temperature / top_p / max_tokens / thinking 参数 / mock |
 | prompts | version + notes |
 | task_sources / item_subset_source | 任务清单与子集文件 |
@@ -145,8 +151,9 @@ per_condition 覆盖率 / per_experiment 计数 / detection_rows`。
 | `ablation.csv` | `group(core/detection/pairs/parse), compared_with, is_main, condition_id, generation_condition, experiment, prompt_condition, dimension, metric, value, n, n_failures, n_neg, n_pos, is_balanced`（检测组带配平标记） |
 | `comparisons.csv` | `family, metric, dimension, axis(thinking/audio_quality/output_form), condition_a, condition_b, n_pairs, acc_a, acc_b, diff, diff_lo, diff_hi, mcnemar_b, mcnemar_c, p, p_holm, method` |
 | `baselines.csv` | `scope, experiment, subset, dimension, baseline(random/majority), value, label, n` |
+| `usage.csv` | `scope, condition_id, generation_condition, n_calls, n_errors, prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens, input_cost_cny, output_cost_cny, total_cost_cny, avg_latency_s` |
 | `confusion/exp3_{initial,final,tone}_overall.csv`、`..._voice_{A-D}.csv` | 混淆矩阵（行=gold，列=pred） |
-| `summary.json` | 机器可读摘要：run 元信息、主条件、生成条件列表、解析统计、bootstrap 设置、各实验 headline 指标、工件路径 |
+| `summary.json` | 机器可读摘要：run 元信息、主条件、生成条件列表、解析统计、bootstrap 设置、各实验 headline 指标、usage/cost、工件路径 |
 
 > 报告不重算预测：所有指标都来自 `items.parquet` + `detection_rows.parquet`，并直接调用
 > `metrics/*` 函数，保证与手工调用一致。若 run 带 `item_subset_source`（消融子集 run），

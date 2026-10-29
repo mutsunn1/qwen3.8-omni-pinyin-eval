@@ -12,7 +12,26 @@
 - [ ] 账号已开通 Qwen3.8-Omni-Flash（或改 `configs/base.yaml: model.model` 为可用模型 id）
 - [ ] 磁盘 ≥ 3 GB（parquet 100MB + 音频 60MB + 任务清单 230MB + 结果）
 - [ ] `configs/base.yaml` 已复核：主实验条件、消融抽样、并发/限流、模型参数
-- [ ] 已知晓调用预算：主实验 ≈ 107,896 次、消融 ≈ 96,960 次，合计 ≈ 204,856 次（见 README 第 2 节）
+- [ ] 已知晓调用预算：完整设计 ≈ 212,576 次（主 126,704 + 消融 85,872，预期 ¥142.8 / 最坏 ¥177.6）；
+      或选择 **¥70 最小化设计**：`configs/minimal.yaml` 59,968 次，预期 ¥18.9 / 最坏 ¥50.1）
+
+## 0.1 两条实验路径
+
+| 路径 | 配置 | 请求数 | 成本（expected / worst） | 适用 |
+|---|---|---:|---:|---|
+| **最小化（推荐先跑）** | `--config configs/minimal.yaml`，见 `docs/experiment-design-minimal.md` | 59,968 | ¥18.9 / ¥50.1（硬预算 70） | pilot / 预算 ≤¥70 |
+| 完整设计 | `--config configs/base.yaml` | 212,576 | ¥142.8 / ¥177.6 | 论文级全量结论 |
+
+最小化路径命令：
+
+```bash
+uv run pinyin-eval --config configs/minimal.yaml build-tasks --minimal
+uv run pinyin-eval --config configs/minimal.yaml generate --tasks all --profile minimal \
+  --conditions minimal --run-id mini-v1 --tag minimal
+uv run pinyin-eval --config configs/minimal.yaml score  --run-id mini-v1
+uv run pinyin-eval --config configs/minimal.yaml report --run-id mini-v1
+uv run pinyin-eval --config configs/minimal.yaml cost   --run-id mini-v1
+```
 
 ## 1. 环境与连通性
 
@@ -44,11 +63,11 @@ uv run pinyin-eval build-tasks --validate
 
 - `prepare-data` 输出 `n_audio=6160, n_voices=4, tones 各 1540, sample_rates=[16000]`；
 - `build-tasks --validate` 输出 `minimal-pair counts match the design document ✓`；
-- 任务清单行数（v2 设计）：`core.jsonl=43056`、`detection.jsonl=36896`、`pairs.jsonl=76448`；
+- 任务清单行数（v3 设计）：`core.jsonl=43056`、`detection.jsonl=36896`、`pairs.jsonl=70944`；
 - 检测集：`main=6160, initial=6128, final=6160, tone=6160`（initial 的 32 条缺口原因见
   `docs/decisions.md` §2.3）；
-- 消融子集：`ablation_core_items.txt=768`、`ablation_detection_items.txt=1536`、
-  `ablation_pairs_items.txt=10752`。
+- 消融子集：`ablation_core_items.txt=768`、`ablation_pairs_items.txt=8448`
+  （v3 检测实验不参与消融，无 `ablation_detection_items.txt`）。
 
 ## 3. 试跑（Pilot，强烈建议）
 
@@ -130,10 +149,12 @@ uv run pinyin-eval report --run-id ablation-v1
 - [ ] `score_summary.parse_status`：`parse_error + refused + empty + api_error` 比例 < 5%，
       且没有集中在某个条件（如果 JSON 条件失败率高，优先怀疑 `response_format` 或
       `max_tokens` 截断）
-- [ ] `report.md` 的“实验×指标矩阵”覆盖 v2 设计文档第 51 行表格的每一项（✓ / —）：
-      实验一/二只报 Tone、检测实验报 EP/ER/F1/FPR/FNR、实验三~六与 A/B 不变
+- [ ] `report.md` 的“实验×指标矩阵”覆盖 v3 设计文档第 51 行表格的每一项（✓ / —）：
+      实验一/二只报 Tone、检测实验报 EP/ER/F1/FPR/FNR、实验四~六各报三个子实验的
+      initial/final/tone（无 A/B）
 - [ ] 检测指标（来自检测实验，neg=一致样本 / pos=不一致变体）EP/ER/F1、FPR/FNR 与
-      bootstrap CI 齐全；分 voice 与总体都有；解析失败单独统计
+      bootstrap CI 齐全；分 voice 与总体都有；解析失败单独统计；检测实验只在主条件运行
+- [ ] 成本节：`usage.csv`、每条件 token/成本、预算状态；实际成本与 `estimate` 预期一致
 - [ ] 消融表每个条件 n 与预期一致（主实验已覆盖的行标注“复用主实验”）
 - [ ] McNemar 的 b/c 与效应量方向符合直觉（如噪声条件应更差）
 - [ ] 混淆矩阵与“最小对立组”设计一致（平翘舌、送气、前后鼻、n/l 应是主要混淆来源）
@@ -154,7 +175,8 @@ uv run pinyin-eval report --run-id ablation-v1
         schema: tone {"tone"} / free {"initial","final","tone"} / detect {"consistent"} / A/B {"choice"}
 Prompt: 版本 <PROMPT_VERSION>，全文见 tasks/*.jsonl 的 prompt_texts
 统计:   bootstrap 2000 次 (cluster=audio, stratify=voice), McNemar + Holm
-调用量: 主实验 ≈107,896; 消融 ≈96,960（以 run_manifest.counts 为准）
+调用量: 完整设计 ≈212,576（预期 ¥142.8 / 最坏 ¥177.6）;
+        或最小化设计 ≈59,968（预期 ¥18.9 / 最坏 ¥50.1，预算 70）
 脚本:   git commit <run_manifest.git_commit>; config sha256 <run_manifest.config_sha256>
 ```
 

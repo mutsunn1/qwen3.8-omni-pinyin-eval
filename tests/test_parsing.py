@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from pinyin_eval.normalize import load_mapping
 from pinyin_eval.parsing import (
     OutputNormalizer,
@@ -172,25 +170,41 @@ def test_detect_missing_consistent_is_parse_error():
 
 
 # ---------------------------------------------------------------------------
-# A/B
+# dimension-only tasks (experiments 4/5)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("text", ['{"choice": "A"}', '{"choice": "a"}', '{"选择": "B"}'])
-def test_ab_json(text):
-    parsed = parse_prediction(text, task_type="ab", output_form="json", normalizer=NORMALIZER)
-    assert parsed.ok
-    assert parsed.choice in ("A", "B")
+def test_initial_json_and_text():
+    assert parse_prediction('{"initial": "zh"}', task_type="initial", output_form="json",
+                            normalizer=NORMALIZER).initial == "zh"
+    assert parse_prediction("声母=zh", task_type="initial", output_form="text",
+                            normalizer=NORMALIZER).initial == "zh"
+    # zero initial: empty marker / y spelling
+    assert parse_prediction("声母=", task_type="initial", output_form="text",
+                            normalizer=NORMALIZER).initial == ""
+    assert parse_prediction('{"initial": "y"}', task_type="initial", output_form="json",
+                            normalizer=NORMALIZER).initial == ""
 
 
-def test_ab_text():
-    parsed = parse_prediction("选择=B", task_type="ab", output_form="text",
-                              normalizer=NORMALIZER)
-    assert parsed.ok
-    assert parsed.choice == "B"
+def test_final_json_and_text():
+    assert parse_prediction('{"final": "ang"}', task_type="final", output_form="json",
+                            normalizer=NORMALIZER).final == "ang"
+    assert parse_prediction("韵母=üan", task_type="final", output_form="text",
+                            normalizer=NORMALIZER).final == "üan"
+    # a full syllable in the final field is split to its final
+    assert parse_prediction("韵母=yuan", task_type="final", output_form="text",
+                            normalizer=NORMALIZER).final == "üan"
+
+
+def test_dimension_task_missing_field_is_parse_error():
+    assert parse_prediction("{}", task_type="initial", output_form="json",
+                            normalizer=NORMALIZER).status == "parse_error"
+    assert parse_prediction('{"final": ""}', task_type="final", output_form="json",
+                            normalizer=NORMALIZER).final == ""
 
 
 # ---------------------------------------------------------------------------
+# failure modes# ---------------------------------------------------------------------------
 # failure modes
 # ---------------------------------------------------------------------------
 

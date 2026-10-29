@@ -15,7 +15,13 @@ import pytest
 from pinyin_eval import metrics, scoring
 from pinyin_eval import tasks as T
 from pinyin_eval.config import Config
-from pinyin_eval.runner import load_generations, read_manifest, run_generation
+from pinyin_eval.runner import (
+    build_request_plan,
+    estimate_plan_cost,
+    load_generations,
+    read_manifest,
+    run_generation,
+)
 
 from .conftest import CONFIG_PATH, MAPPING_CSV
 
@@ -66,10 +72,9 @@ def test_runner_dry_run(small_cfg, tiny_records, mapping):
 def test_mock_run_scoring_and_detection(small_cfg, tiny_records, mapping):
     core, detect, pairs = _tasks(small_cfg, tiny_records, mapping)
     all_tasks = core + detect + pairs
-    keep, subset = _audio_subset(all_tasks, n_audios=2)
     result = run_generation(
         small_cfg, all_tasks, conditions=[small_cfg.main_condition],
-        item_subset=subset, run_id="mock-perfect", mock=True,
+        run_id="mock-perfect", mock=True,
     )
     assert result["n_error"] == 0
     assert result["n_ok"] == result["n_requests"]
@@ -77,7 +82,7 @@ def test_mock_run_scoring_and_detection(small_cfg, tiny_records, mapping):
     out = scoring.score_run(small_cfg, "mock-perfect", tasks=all_tasks)
     items = out["items"]
     assert items["parse_status"].eq("ok").all()
-    assert set(items["task_type"]) == {"free", "tone", "detect", "ab"}
+    assert set(items["task_type"]) == {"free", "tone", "initial", "final", "detect"}
 
     # perfect mock -> perfect free recognition (experiment 3 view)
     free = items[items["task_type"] == "free"].to_dict("records")
@@ -107,17 +112,30 @@ def test_mock_run_scoring_and_detection(small_cfg, tiny_records, mapping):
     assert det["error_recall"] == 1.0
     assert det["fpr"] == 0.0 and det["fnr"] == 0.0
 
-    # A/B tasks parsed and correct
-    ab = items[items["task_type"] == "ab"].to_dict("records")
-    assert ab and metrics.ab_metrics(ab)["accuracy"] == 1.0
+    # experiments 4/5 dimension tasks: initial / final correctness
+    for task_type, column in (("initial", "initial_correct"), ("final", "final_correct")):
+        subset = items[items["task_type"] == task_type]
+        assert len(subset) > 0
+        rows = subset.to_dict("records")
+        gold = [r["gold_initial"] if column == "initial_correct" else r["gold_final"] for r in rows]
+        pred = [r["pred_initial"] if column == "initial_correct" else r["pred_final"] for r in rows]
+        mapping = {"gold": gold, "pred": pred}
+        correct = sum(g == p for g, p in zip(mapping["gold"], mapping["pred"], strict=True))
+        assert correct == len(rows)
 
     # correctness columns are scoped to the right task types
-    assert items.loc[items["task_type"] == "free", "initial_correct"].notna().all()
-    assert items.loc[items["task_type"] != "free", "initial_correct"].isna().all()
-    assert items.loc[items["task_type"].isin(["free", "tone"]), "tone_correct"].notna().all()
+    free_or_initial = items["task_type"].isin(["free", "initial"])
+    assert items.loc[free_or_initial, "initial_correct"].notna().all()
+    assert items.loc[~free_or_initial, "initial_correct"].isna().all()
+    free_or_final = items["task_type"].isin(["free", "final"])
+    assert items.loc[free_or_final, "final_correct"].notna().all()
+    assert items.loc[~free_or_final, "final_correct"].isna().all()
+    free_or_tone = items["task_type"].isin(["free", "tone"])
+    assert items.loc[free_or_tone, "tone_correct"].notna().all()
+    assert items.loc[~free_or_tone, "tone_correct"].isna().all()
     assert items.loc[items["task_type"] == "detect", "consistent_correct"].notna().all()
     assert items.loc[items["task_type"] != "detect", "consistent_correct"].isna().all()
-    assert items.loc[items["task_type"] == "ab", "choice_correct"].notna().all()
+    assert items["choice_correct"].isna().all()  # v3: no A/B tasks
 
 
 def test_limit_is_seeded_per_condition_sample(small_cfg, tiny_records, mapping):
@@ -167,20 +185,21 @@ def test_resume_is_idempotent(small_cfg, tiny_records, mapping):
     assert len(generations) == n_first
 
 
-def test_request_dedupe_across_experiment_views(small_cfg, tiny_records, mapping):
-    """exp3 free and exp4/5/6 free share one API call for the same audio."""
+def test_request_dedupe_for_identical_prompts(small_cfg, tiny_records, mapping):
+    """Identical (audio, prompt, condition) requests are only sent once."""
     core, detect, pairs = _tasks(small_cfg, tiny_records, mapping)
     all_tasks = core + detect + pairs
-    keep, subset = _audio_subset(all_tasks, n_audios=2)
+    # duplicate the catalog: every request exists twice, dedupe must halve calls
+    duplicated = list(all_tasks) + list(all_tasks)
     result = run_generation(
-        small_cfg, all_tasks, conditions=[small_cfg.main_condition],
-        item_subset=subset, run_id="dedupe", mock=True,
+        small_cfg, duplicated, conditions=[small_cfg.main_condition],
+        run_id="dedupe", mock=True,
     )
-    generations = load_generations(Path(result["run_dir"]))
-    out = scoring.score_run(small_cfg, "dedupe", tasks=all_tasks)
-    free_items = out["items"][out["items"]["task_type"] == "free"]
-    free_calls = [g for g in generations if g.prompt_condition == "free"]
-    assert len(free_items) > len(free_calls)
+    unique_expected = run_generation(
+        small_cfg, all_tasks, conditions=[small_cfg.main_condition],
+        run_id="dedupe-ref", mock=True,
+    )
+    assert result["n_requests"] == unique_expected["n_requests"]
 
 
 def test_error_records_are_kept(small_cfg, tiny_records, mapping):
@@ -210,6 +229,9 @@ def test_manifest_records_reproducibility_fields(small_cfg, tiny_records, mappin
     assert manifest["model"]["name"] == small_cfg.model_name
     assert manifest["config"]["generation"]["main_condition"]["thinking"] is True
     assert manifest["counts"]["n_planned"] > 0
+    assert manifest["pricing"]["input_per_mtok"] == 0.8
+    assert manifest["budget_cny"] is None
+    assert "cost_cny" in manifest["counts"]
 
 
 def test_item_subset_accepts_comma_separated_files(small_cfg, tiny_records, mapping):
@@ -223,6 +245,43 @@ def test_item_subset_accepts_comma_separated_files(small_cfg, tiny_records, mapp
     manifest = {"item_subset_source": "manifests/tasks/a.txt,manifests/tasks/b.txt"}
     subset = scoring.load_run_item_subset(small_cfg, manifest)
     assert subset == set(ids_a) | set(ids_b)
+
+
+def test_estimate_plan_cost(small_cfg, tiny_records, mapping):
+    core, detect, pairs = _tasks(small_cfg, tiny_records, mapping)
+    all_tasks = core + detect + pairs
+    plans = build_request_plan(small_cfg, all_tasks, [small_cfg.main_condition])
+    est = estimate_plan_cost(small_cfg, plans)
+    assert est["n_requests"] == len(plans) > 0
+    assert est["expected_cost_cny"] <= est["conservative_cost_cny"]
+    assert est["conservative_cost_cny"] <= est["worst_case_cost_cny"]
+    assert est["max_output_tokens_cap"] == small_cfg.get("model.max_output_tokens")
+    assert est["budget"]["budget_cny"] is None
+    assert sum(v["n_requests"] for v in est["by_condition"].values()) == len(plans)
+
+
+def test_budget_guard_stops_calls(small_cfg, tiny_records, mapping):
+    core, detect, pairs = _tasks(small_cfg, tiny_records, mapping)
+    all_tasks = core + detect + pairs
+    # make every mock call expensive (100 prompt + 20 completion tokens) so the
+    # budget is hit after a handful of calls
+    cfg = small_cfg.with_overrides({
+        "pricing": {"input_per_mtok": 1000.0, "output_per_mtok": 1000.0,
+                    "cache_hit_input_per_mtok": 0.0},
+        "generation": {"budget_cny": 0.5},
+    })
+    keep, subset = _audio_subset(all_tasks, n_audios=3)
+    result = run_generation(
+        cfg, all_tasks, conditions=[cfg.main_condition], item_subset=subset,
+        run_id="budget", mock=True,
+    )
+    assert result["n_skipped_budget"] > 0
+    assert result["n_calls"] < result["n_planned"]
+    manifest = read_manifest(Path(result["run_dir"]))
+    assert manifest["status"] == "budget_exceeded"
+    assert manifest["budget_cny"] == 0.5
+    assert manifest["counts"]["budget"]["within_budget"] is False
+    assert manifest["pricing"]["input_per_mtok"] == 1000.0
 
 
 def test_scoring_filters_to_planned_calls(small_cfg, tiny_records, mapping):

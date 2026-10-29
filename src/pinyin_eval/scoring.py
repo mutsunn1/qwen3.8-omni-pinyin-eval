@@ -140,6 +140,8 @@ def _make_result(
         gold_final=task.gold_final,
         gold_tone=int(task.gold_tone),
         given_target=task.given_target,
+        given_initial=task.given_initial,
+        given_final=task.given_final,
         given_tone=task.given_tone,
         consistent_gold=task.consistent_gold,
         alternatives=task.alternatives,
@@ -239,17 +241,19 @@ def build_item_results(
 def attach_correctness(df: pd.DataFrame) -> pd.DataFrame:
     """Add per-dimension correctness columns (NA when the task does not ask).
 
-    Task types map to the design's output schemas:
+    v3 task types / output schemas:
 
-    * ``free``   -> initial / final / tone / joint correctness (experiment 3, 4-6 free);
-    * ``tone``   -> tone correctness only (experiments 1/2 and target conditions);
-    * ``detect`` -> consistency correctness only (detection experiment);
-    * ``ab``     -> A/B choice correctness (experiments 4-6).
+    * ``free``    -> initial / final / tone / joint (experiment 3);
+    * ``tone``    -> tone only (experiments 1/2, exp6 sub-experiments);
+    * ``initial`` -> initial only (exp4 sub-experiments);
+    * ``final``   -> final only (exp5 sub-experiments);
+    * ``detect``  -> consistency only (detection experiment).
     """
     if df.empty:
         return df
     out = df.copy()
     ok = out["parse_status"].eq("ok").tolist()
+    tt = out["task_type"].astype(str) if "task_type" in out.columns else None
     gold_tone = out["gold_tone"].tolist()
     gold_initial = out["gold_initial"].tolist()
     gold_final = out["gold_final"].tolist()
@@ -258,8 +262,6 @@ def attach_correctness(df: pd.DataFrame) -> pd.DataFrame:
     pred_tone = out["pred_tone"].tolist()
     consistent_gold = out["consistent_gold"].tolist()
     pred_consistent = out["pred_consistent"].tolist()
-    correct_choice = out["correct_choice"].tolist()
-    pred_choice = out["pred_choice"].tolist()
 
     def _missing(value: Any) -> bool:
         if value is None:
@@ -274,7 +276,6 @@ def attach_correctness(df: pd.DataFrame) -> pd.DataFrame:
     tone_correct: list[Any] = []
     joint_correct: list[Any] = []
     consistent_correct: list[Any] = []
-    choice_correct: list[Any] = []
     for i in range(len(out)):
         valid = ok[i]
         i_ok = valid and not _missing(pred_initial[i]) and gold_initial[i] == pred_initial[i]
@@ -291,35 +292,34 @@ def attach_correctness(df: pd.DataFrame) -> pd.DataFrame:
             and bool(consistent_gold[i]) == bool(pred_consistent[i])
         )
         consistent_correct.append(c_ok if valid else None)
-        ch_ok = (
-            valid
-            and correct_choice[i] is not None
-            and not _missing(pred_choice[i])
-            and str(correct_choice[i]) == str(pred_choice[i])
-        )
-        choice_correct.append(ch_ok if valid else None)
 
     out["initial_correct"] = pd.array(initial_correct, dtype="boolean")
     out["final_correct"] = pd.array(final_correct, dtype="boolean")
     out["tone_correct"] = pd.array(tone_correct, dtype="boolean")
     out["joint_correct"] = pd.array(joint_correct, dtype="boolean")
     out["consistent_correct"] = pd.array(consistent_correct, dtype="boolean")
-    out["choice_correct"] = pd.array(choice_correct, dtype="boolean")
+    out["choice_correct"] = pd.array([None] * len(out), dtype="boolean")
+    out["consistency_tone_correct"] = pd.array([None] * len(out), dtype="boolean")
 
-    tt = out["task_type"].astype(str) if "task_type" in out.columns else ""
-    is_free = tt.eq("free") if hasattr(tt, "eq") else (tt == "free")
-    is_tone = tt.eq("tone") if hasattr(tt, "eq") else (tt == "tone")
-    is_detect = tt.eq("detect") if hasattr(tt, "eq") else (tt == "detect")
-    is_ab = tt.eq("ab") if hasattr(tt, "eq") else (tt == "ab")
+    if tt is not None:
+        is_free = tt.eq("free")
+        is_tone = tt.eq("tone")
+        is_initial = tt.eq("initial")
+        is_final = tt.eq("final")
+        is_detect = tt.eq("detect")
+    else:  # legacy runs without task_type: derive from prompt condition
+        pc = out["prompt_condition"].astype(str)
+        is_free = pc.eq("free")
+        is_tone = pc.isin(["correct_target", "wrong_target"])
+        is_initial = pd.Series(False, index=out.index)
+        is_final = pd.Series(False, index=out.index)
+        is_detect = pc.eq("detect")
 
-    # initial/final/joint exist only for free recognition
-    for col in ("initial_correct", "final_correct", "joint_correct"):
-        out.loc[~is_free, col] = pd.NA
-    # tone is measured for free recognition and for the tone-only tasks
+    out.loc[~(is_free | is_initial), "initial_correct"] = pd.NA
+    out.loc[~(is_free | is_final), "final_correct"] = pd.NA
     out.loc[~(is_free | is_tone), "tone_correct"] = pd.NA
-    out["consistency_tone_correct"] = pd.NA  # kept for schema compatibility
+    out.loc[~is_free, "joint_correct"] = pd.NA
     out.loc[~is_detect, "consistent_correct"] = pd.NA
-    out.loc[~is_ab, "choice_correct"] = pd.NA
     return out
 
 

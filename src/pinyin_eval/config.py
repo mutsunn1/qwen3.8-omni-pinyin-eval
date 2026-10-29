@@ -65,6 +65,14 @@ class ConfigError(ValueError):
     pass
 
 
+def _load_yaml(path: str | Path) -> dict[str, Any]:
+    with Path(path).open("r", encoding="utf-8") as fh:
+        value = yaml.safe_load(fh) or {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"config root must be a mapping: {path}")
+    return value
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     out = copy.deepcopy(base)
     for key, value in override.items():
@@ -98,6 +106,18 @@ class Config:
             raise ConfigError(f"config file not found: {config_path}")
         with config_path.open("r", encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
+        # optional single inheritance: ``extends: configs/base.yaml``
+        parent = raw.pop("extends", None)
+        if parent:
+            parent_path = Path(parent)
+            if not parent_path.is_absolute():
+                parent_path = config_path.parent.parent / parent_path
+            if not parent_path.exists():
+                parent_path = config_path.parent / parent_path
+            if not parent_path.exists():
+                raise ConfigError(f"parent config not found: {parent} (from {config_path})")
+            base_raw = _load_yaml(parent_path)
+            raw = _deep_merge(base_raw, raw)
         if overrides:
             raw = _deep_merge(raw, overrides)
         root = Path(repo_root) if repo_root is not None else Path.cwd()

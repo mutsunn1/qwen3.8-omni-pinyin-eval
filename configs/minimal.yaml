@@ -1,0 +1,61 @@
+# ---------------------------------------------------------------------------
+# 最小化实验设计配置（¥70 预算内）
+#
+# 设计文档: docs/experiment-design-minimal.md
+# 继承 configs/base.yaml，只覆盖最小化实验需要的参数。
+#
+# 用法:
+#   uv run pinyin-eval --config configs/minimal.yaml build-tasks --minimal
+#   uv run pinyin-eval --config configs/minimal.yaml estimate --tasks all --profile main
+#   uv run pinyin-eval --config configs/minimal.yaml generate --tasks all --conditions minimal
+# ---------------------------------------------------------------------------
+extends: configs/base.yaml
+
+project:
+  name: qwen38-omni-pinyin-minimal
+  description: 最小化实验（预算 ¥70）：4 个生成条件 × 固定子集，可行性/趋势级结论
+
+generation:
+  # 主条件 = 最便宜的 JSON + 关闭思考（最小化预算优先）
+  main_condition:
+    thinking: false
+    audio_quality: clean
+    output_form: json
+  # 最小化实验总共 4 个生成条件（见 docs/experiment-design-minimal.md §3）
+  budget_cny: 70
+
+pricing:
+  # 若改用其他地域/快照，按控制台价格修改
+  input_per_mtok: 0.8
+  cache_hit_input_per_mtok: 0.1
+  output_per_mtok: 2.7
+
+minimal:
+  # 核心/检测实验的音频子集：96 个 target × 4 voice × 4 tone = 1,536 条音频
+  n_targets: 96
+  # 最小对：每个 pair_type 抽 48 个实例（每实例两侧 × 3 个子实验）
+  pair_instances_per_type: 48
+  # 最小化实验的 4 个生成条件（main / thinking / noise / text 单因素对比）
+  conditions:
+    - thinking: false
+      audio_quality: clean
+      output_form: json
+      role: main
+    - thinking: true
+      audio_quality: clean
+      output_form: json
+      role: thinking_ablation
+    - thinking: false
+      audio_quality: noise_20db
+      output_form: json
+      role: noise_ablation
+    - thinking: false
+      audio_quality: clean
+      output_form: text
+      role: output_ablation
+
+tasks:
+  ablation:
+    # 最小化设计不用 256 条消融网格；保留字段以兼容 base 校验
+    items_per_condition: 256
+    strata_per_voice_tone: 16
