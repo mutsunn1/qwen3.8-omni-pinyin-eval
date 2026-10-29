@@ -69,7 +69,8 @@ def test_tone_prompt_shared_by_exp1_and_exp2():
 def test_free_recognition_prompt():
     text = build_prompt_text(make_task("free"), "json")
     assert "请识别该音节的声母、韵母和声调" in text
-    assert "零声母用空字符串表示" in text
+    assert '零声母时写空字符串 ""' in text
+    assert "ü 直接写作 ü" in text  # pilot: model tends to write v
     assert "zhang" not in text
 
 

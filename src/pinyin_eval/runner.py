@@ -366,6 +366,7 @@ def run_generation(
     extra_manifest: dict[str, Any] | None = None,
     max_cost_cny: float | None = None,
     item_subset_by_generation: Mapping[str, set[str]] | None = None,
+    min_interval_s: float | None = None,
 ) -> dict[str, Any]:
     if conditions is None:
         conditions = [cfg.main_condition]
@@ -511,19 +512,36 @@ def run_generation(
     budget_stop = False
     todo_iter = iter(todo)
     executed = 0
+    # throttle staggering of request *starts* without reducing parallelism:
+    # wait until there are (at most) k empty slots, then start one next request;
+    # this spreads bursts across time while keeping `concurrency` in flight.
+    min_interval = float(min_interval_s) if min_interval_s and min_interval_s > 0 else 0.0
+    next_start = time.monotonic()
+    if min_interval:
+        log.info("staggering request starts by %.2fs (concurrency=%d)",
+                 min_interval, concurrency)
 
     with generations_path.open("a", encoding="utf-8") as out_fh:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             inflight: dict[Any, RequestPlan] = {}
 
-            def _fill() -> None:
+            def _fill(wait_first: bool = False) -> None:
                 """Submit up to ``concurrency`` more requests (unless budget hit)."""
+                nonlocal next_start
+                first = True
                 while len(inflight) < concurrency and not budget_stop:
+                    if min_interval and (wait_first or not first):
+                        now = time.monotonic()
+                        delay = next_start - now
+                        if delay > 0:
+                            time.sleep(delay)
+                    next_start = time.monotonic() + min_interval
                     try:
                         plan = next(todo_iter)
                     except StopIteration:
                         return
                     inflight[pool.submit(_execute, plan)] = plan
+                    first = False
 
             _fill()
             while inflight:
@@ -570,7 +588,7 @@ def run_generation(
                             "cost budget reached: %.4f >= %.2f CNY; stopping new requests",
                             counters["cost_cny"], budget_cny,
                         )
-                _fill()
+                _fill(wait_first=min_interval > 0)
 
     counters["n_skipped_budget"] = max(0, len(todo) - executed)
 

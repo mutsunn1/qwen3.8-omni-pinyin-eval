@@ -22,7 +22,8 @@
 > 取消 A/B、实验四~六改为三个子实验、检测实验不参与消融）实现，离线测试全绿；
 > `all-mock` 可在无 API key 的情况下跑通
 > `prepare-data → build-tasks → generate(mock) → score → report` 全链路。
-> 真实 API 调用尚未执行（本机未配置 `DASHSCOPE_API_KEY` / 业务空间 `DASHSCOPE_BASE_URL`）。
+> 真实 API 已打通（2026-10-29）：`smoke` 成功，最小化设计 pilot 156 次全部可解析；
+> 最小化主实验 run `mini3-v1`（59,968 次，预算 ¥70）已启动。
 > 设计快照：`docs/experiment-design.md`（v3, 2026-10-28 20:37）。
 > **另有 ¥70 预算的最小化实验设计**：[docs/experiment-design-minimal.md](docs/experiment-design-minimal.md)
 > （4 个生成条件、59,968 次调用、预期 ¥19 / 最坏 ¥50，硬预算 70；见 §2.1）。
@@ -98,6 +99,8 @@ uv run pinyin-eval report --run-id <主实验 run_id>
 > 成本按 `qwen3.8-omni-flash` 华北2 价格（输入 ¥0.8/M、输出 ¥2.7/M，音频 7 token/秒）
 > 与 `max_tokens=256` 上限估算，详见 `pinyin_eval.pricing` 与 `pinyin-eval estimate`。
 > **如果预算只有 ¥70，请直接使用 §2.1 的最小化实验设计。**
+> 实测（2026-10-29 pilot）：think-off ≈¥0.00011/次、think-on ≈¥0.00046/次，
+> 最小化 59,968 次实际预计 ≈¥11（预算上限 ¥50.1，硬预算 ¥70）。
 
 ### 2.1 最小化实验设计（¥70 预算，推荐先跑）
 

@@ -35,10 +35,12 @@ from typing import Any
 
 from .records import TaskItem
 
-PROMPT_VERSION = "p3"
+PROMPT_VERSION = "p3.1"
 PROMPT_VERSION_NOTES = (
     "2026-10-28 v3：取消 A/B；实验四~六改为自由检测/正确信息/错误信息三个子实验，"
-    "各自输出 initial/final/tone；检测实验不参与消融；实验一/二只评声调；实验三自由识别"
+    "各自输出 initial/final/tone；检测实验不参与消融；实验一/二只评声调；实验三自由识别。"
+    "p3.1（2026-10-29 依据真实 pilot）：实验三与 exp5 free 明确 ü 写作 ü（实测模型倾向输出 v），"
+    "声母/韵母书写规则写进 prompt"
 )
 
 #: shared system prompt (design doc section 五)
@@ -80,7 +82,8 @@ TONE_PROMPT = """音频：一段普通话单音节。
 
 FREE_PROMPT = """音频：一段普通话单音节。
 请识别该音节的声母、韵母和声调（1–4）。
-零声母用空字符串表示。
+声母用拼音字母书写（如 zh、b、n），零声母时写空字符串 ""；
+韵母用拼音字母书写，ü 直接写作 ü（不要写成 v）。
 {format_instruction}"""
 
 FREE_DIMENSION_PROMPT = """音频：一段普通话单音节。
@@ -128,6 +131,10 @@ def _dimension_word(task_type: str) -> str:
     return DIMENSION_WORD.get(task_type, "声调")
 
 
+def _is_dimension_free_prompt(task: TaskItem) -> bool:
+    return task.experiment in ("exp4", "exp5", "exp6") and task.prompt_condition == "free"
+
+
 def _is_pair_info_prompt(task: TaskItem) -> bool:
     """Experiments 4-6 use the target-information prompt for correct/wrong info."""
     return task.experiment in ("exp4", "exp5", "exp6") and task.prompt_condition in (
@@ -153,6 +160,10 @@ def build_prompt_text(task: TaskItem, output_form: str) -> str:
         return FREE_PROMPT.format(format_instruction=fmt)
 
     # tone / initial / final are dimension outputs
+    if task.task_type == "final" and _is_dimension_free_prompt(task):
+        return FREE_DIMENSION_PROMPT.format(
+            dimension="韵母（ü 直接写作 ü，不要写成 v）", format_instruction=fmt
+        )
     if _is_pair_info_prompt(task):
         if task.given_initial is None or task.given_final is None or task.given_tone is None:
             raise ValueError(

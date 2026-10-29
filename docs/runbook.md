@@ -50,7 +50,9 @@ uv run pinyin-eval smoke          # 1 次真实调用；应返回可解析的 te
 | 404 / model not found | 检查 `configs/base.yaml: model.model`；确认账号已开通该模型 |
 | 400 / url error | 百炼要求业务空间 `DASHSCOPE_BASE_URL`，不能用公共地址 |
 | 400 / unsupported parameter | 检查 `model.thinking_on_reasoning_effort`；关闭时可设 `null` 试 |
-| 429 / rate limit | 降低 `model.concurrency`、设置 `model.qps`（如 1–4） |
+| 429 / rate limit | 降低并发与错峰：`--concurrency 2 --qps 2`，或
+  `generate --min-interval 0.5`（错峰启动，不降低并行度）；网络中断也可用
+  `--request-timeout 200` |
 
 ## 2. 数据准备
 
@@ -93,6 +95,17 @@ Pilot 验收指标（`results/runs/pilot1/score_summary.json`）：
 
 若 pilot 发现提示词问题：修改 `src/pinyin_eval/prompts.py` 后必须
 **提升 `PROMPT_VERSION`**、重新 `build-tasks`（request_id 会变化），旧 pilot 结果作废。
+
+## 3.1 真实实验实测参考（2026-10-29，华北2 业务空间）
+
+| 项 | 实测 |
+|---|---|
+| smoke | 1 次成功，7.1 s，45 prompt tokens |
+| pilot（156 次，13 condition） | 解析 156/156，成本 ¥0.0302，平均 1.74 s |
+| 延迟 | think off 0.8–1.7 s；think on 2.9–4.8 s |
+| 单位成本 | think off ≈¥0.00011/次；think on ≈¥0.00046/次 |
+| 最小化 59,968 次的预计成本 | **≈¥11**（estimate expected ¥18.9 / worst ¥50.1） |
+| prompt p3.1 修正 | 自由识别 prompt 明确 “ü 写作 ü，不要写 v”（实测模型会输出 v） |
 
 ## 4. 主实验（全量）
 

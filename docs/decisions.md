@@ -103,11 +103,29 @@
 | 最小对计数 | 36/67/21/40/5/3/2268 对，576/1072/336/640/80/48/9072 实例，`build-tasks --validate` 断言 ✓ |
 | 数据集 commit | `d607806619aba678030dac10ea086fb19347205a` |
 
+## 8.1 真实 pilot 实测（2026-10-29，华北2 业务空间 ws-9mw2rfxyo1pn3qsv）
+
+* `smoke`：1 次调用成功（`"声调=1"`，45 prompt tokens，7.1 s）。
+* pilot（最小化设计 × `--limit 12` = 156 次，13 个 condition）：**156/156 解析成功、0 错误**，
+  成本 **¥0.0302**，平均延迟 1.74 s（think off ≈0.8–1.7 s，think on ≈2.9–4.8 s）。
+* 实测 prompt tokens ≈117–137/次（含音频 2–14 token），比预估（约 150–200）更低；
+  think off 输出 5–7 token、think on reasoning ≈110 token。
+* **实测单价推算**：think-off ≈ ¥0.00011/次，think-on ≈ ¥0.00046/次；
+  最小化默认档（59,968 次）**实际预计 ≈¥11**，远低于 estimate 的 expected ¥18.9
+  与 worst-case ¥50.1；¥70 预算充足。
+* **发现的问题与修正（prompt p3.1）**：模型在自由识别时会写 `"v"`（实测
+  `{"initial": "q", "final": "v", ...}`）。解析层本就把 v→ü 规范化，但为减少噪声，
+  实验三与 exp5 free prompt 明确 “ü 直接写作 ü（不要写成 v）”，并写明声母书写规则。
+* 扫描/中断保护：`--concurrency`、`--qps`、`--request-timeout` 全局参数与
+  `generate --min-interval`（错峰启动，不降低并行度）已加入，用于账号限流（README 429 处理）。
+* 未受影响：HuggingFace/GitHub 在本机被系统代理拦截（Clash 主节点故障），
+  但数据与任务清单已在本地，实验不受影响；需要访问 GitHub 时临时关闭代理。
+
 ## 9. 未决问题（不阻塞框架）
 
 1. 正式实验使用哪个模型快照 id（若百炼提供 `qwen3.8-omni-flash-YYYY-MM-DD`）？
    config 已留位置，建议开跑前固定并记录附录。
-2. 真实 API 凭证（`DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL`）尚未配置；配置后先
-   `smoke` + pilot（最小化设计 156 次调用）再决定跑完整还是最小化。
+2. ~~真实 API 凭证尚未配置~~ —— 已于 2026-10-29 配置（业务空间
+   `ws-9mw2rfxyo1pn3qsv`，华北2），smoke + pilot 通过，正在运行最小化主实验（`mini3-v1`）。
 3. 最小化设计默认档位（96 target / 48 实例/类）与 70 元预算的对应关系已在
    `docs/experiment-design-minimal.md` §3.5 给出；如预算币种不是 CNY，按价格换算调整。

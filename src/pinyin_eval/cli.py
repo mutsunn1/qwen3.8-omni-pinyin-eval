@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="YAML config path (default: $PINYIN_EVAL_CONFIG or %(default)s)")
     parser.add_argument("--root", default=None, help="repo root (default: current directory)")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--concurrency", type=int, default=None,
+                        help="override model.concurrency (parallel API requests)")
+    parser.add_argument("--qps", type=float, default=None, help="override model.qps (requests/second)")
+    parser.add_argument("--request-timeout", type=float, default=None,
+                        help="override model.request_timeout_s (seconds)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # prepare-data -------------------------------------------------------
@@ -105,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-resume", action="store_true", help="ignore existing generations of the same run id")
     p.add_argument("--max-cost", type=float, default=None,
                    help="hard CNY budget: stop issuing new API calls when reached")
+    p.add_argument("--min-interval", type=float, default=None,
+                   help="minimum seconds between starts of the first wave (throttle bursts)")
     p.set_defaults(func=cmd_generate)
 
     # score --------------------------------------------------------------
@@ -154,6 +161,16 @@ def load_config(args: argparse.Namespace) -> Config:
         cfg = Config.load(args.config, repo_root=args.root)
     except ConfigError as exc:
         raise SystemExit(f"config error: {exc}") from exc
+    overrides: dict[str, object] = {}
+    if getattr(args, "concurrency", None):
+        overrides["concurrency"] = int(args.concurrency)
+    if getattr(args, "qps", None):
+        overrides["qps"] = float(args.qps)
+    if getattr(args, "request_timeout", None):
+        overrides["request_timeout_s"] = float(args.request_timeout)
+    if overrides:
+        cfg = cfg.with_overrides({"model": overrides})
+        log.info("model overrides: %s", overrides)
     if args.log_level != "INFO":
         logging.getLogger().setLevel(getattr(logging, args.log_level))
     return cfg
@@ -489,6 +506,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         task_sources=task_sources,
         max_cost_cny=args.max_cost,
         item_subset_by_generation=gen_subsets,
+        min_interval_s=args.min_interval,
         extra_manifest={"cli": {"tasks": args.tasks, "profile": args.profile,
                                 "conditions_arg": args.conditions}},
     )
