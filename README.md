@@ -41,7 +41,7 @@ scripts/setup.sh            # 或 make setup：uv sync --locked + 生成 .env + 
 # 编辑 .env 填入 DASHSCOPE_API_KEY / DASHSCOPE_BASE_URL（只跑 mock 时可留空）
 
 make mock                   # 离线全链路自测：prepare-data → build-tasks → generate(mock) → score → report
-make test                   # 237 个离线测试
+make test                   # 238 个离线测试
 make lint                   # ruff
 ```
 
@@ -205,7 +205,7 @@ src/pinyin_eval/
   scoring.py cli.py
   data/dataset.py data/minimal_pairs.py
   metrics.py stats.py report.py tasks.py
-tests/                         # 237 个离线测试（无网络/无 key）
+tests/                         # 238 个离线测试（无网络/无 key）
 ```
 
 ## 6. 模型调用细节（百炼 OpenAI 兼容接口）
@@ -237,7 +237,7 @@ tests/                         # 237 个离线测试（无网络/无 key）
 ## 8. 测试
 
 ```bash
-uv run pytest                 # 237 passed（离线）
+uv run pytest                 # 238 passed（离线）
 uv run ruff check src tests   # All checks passed
 ```
 

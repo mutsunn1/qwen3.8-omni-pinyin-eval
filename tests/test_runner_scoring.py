@@ -7,6 +7,7 @@ dedicated detection experiment).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,32 @@ def test_mock_run_scoring_and_detection(small_cfg, tiny_records, mapping):
     assert items.loc[items["task_type"] == "detect", "consistent_correct"].notna().all()
     assert items.loc[items["task_type"] != "detect", "consistent_correct"].isna().all()
     assert items.loc[items["task_type"] == "ab", "choice_correct"].notna().all()
+
+
+def test_limit_is_seeded_per_condition_sample(small_cfg, tiny_records, mapping):
+    core, detect, pairs = _tasks(small_cfg, tiny_records, mapping)
+    all_tasks = core + detect + pairs
+    conditions = [small_cfg.main_condition]
+    first = run_generation(
+        small_cfg, all_tasks, conditions=conditions, run_id="limit-a",
+        dry_run=True, limit=3,
+    )
+    second = run_generation(
+        small_cfg, all_tasks, conditions=conditions, run_id="limit-a",
+        dry_run=True, limit=3,
+    )
+    assert first["n_requests"] == second["n_requests"]
+    # at most 3 requests per condition id and the plan is deterministic
+    plan_a = Path(first["run_dir"]) / "dry_run_plan.jsonl"
+    plan_b = Path(second["run_dir"]) / "dry_run_plan.jsonl"
+    assert plan_a.read_text() == plan_b.read_text()
+    lines = [json.loads(line) for line in plan_a.read_text().splitlines() if line.strip()]
+    per_condition: dict[str, int] = {}
+    for row in lines:
+        per_condition[row["condition_id"]] = per_condition.get(row["condition_id"], 0) + 1
+    assert all(count <= 3 for count in per_condition.values())
+    # a pilot sample should not be confined to a single prompt view
+    assert len({row["prompt_condition"] for row in lines}) >= 2
 
 
 def test_resume_is_idempotent(small_cfg, tiny_records, mapping):

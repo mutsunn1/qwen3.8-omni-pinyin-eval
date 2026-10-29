@@ -93,7 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--condition", action="append", default=None,
                    metavar="THINK:QUALITY:FORM",
                    help="extra/override generation condition, e.g. think0:clean:json")
-    p.add_argument("--limit", type=int, default=None, help="only the first N requests (smoke runs)")
+    p.add_argument("--limit", type=int, default=None,
+                   help="pilot mode: at most N requests per generation condition (seeded random sample)")
     p.add_argument("--run-id", default=None)
     p.add_argument("--tag", default="")
     p.add_argument("--dry-run", action="store_true", help="write the request plan, do not call the API")

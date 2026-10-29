@@ -342,13 +342,25 @@ def run_generation(
         conditions = [cfg.main_condition]
     plans = build_request_plan(cfg, tasks, conditions, item_subset=item_subset)
     if limit is not None:
-        # keep the first N requests *per condition*, so --limit is useful for
-        # pilot runs that need to cover the whole condition grid cheaply
+        # Keep at most N requests *per condition*, drawn as a deterministic
+        # random sample: pilot runs with --limit must cover the whole condition
+        # grid, all prompt views and the different audio/pair families, not just
+        # the first N items of the catalog.
+        import hashlib as _hashlib
+        import random as _random
+
         per_condition: dict[str, list[RequestPlan]] = {}
         for plan in plans:
             per_condition.setdefault(plan.condition_id, []).append(plan)
+        selected: list[RequestPlan] = []
+        for condition_id, group in sorted(per_condition.items()):
+            k = min(int(limit), len(group))
+            digest = _hashlib.sha256(f"{cfg.seed()}:limit:{condition_id}".encode()).digest()
+            rng = _random.Random(int.from_bytes(digest[:8], "little"))
+            idx = sorted(rng.sample(range(len(group)), k)) if k < len(group) else range(len(group))
+            selected.extend(group[i] for i in idx)
         plans = sorted(
-            [p for group in per_condition.values() for p in group[: int(limit)]],
+            selected,
             key=lambda p: (p.condition_id, p.experiment, p.item_id, p.request_id),
         )
     summary = plan_summary(plans)

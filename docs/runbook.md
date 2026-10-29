@@ -55,10 +55,12 @@ uv run pinyin-eval build-tasks --validate
 正式烧预算前，先用 40 条音频 × **全部 8 个生成条件**验证 prompt / 解析 / thinking 行为：
 
 ```bash
-# --limit N 表示“每个生成条件各取前 N 条请求”；8 个条件 × 25 条 = 200 次调用
+# --limit N 表示“每个生成条件最多随机抽 N 条请求”（覆盖 free/correct/wrong/detect/AB 五种
+# 提示视图 × 8 个生成条件 = 40 condition_id；25 条/条件 ≈ 1,000 次调用，成本很低）
 uv run pinyin-eval generate --tasks all --conditions all --limit 25 \
   --run-id pilot1 --tag pilot
 uv run pinyin-eval score --run-id pilot1
+uv run pinyin-eval report --run-id pilot1
 ```
 
 Pilot 验收指标（`results/runs/pilot1/score_summary.json`）：
