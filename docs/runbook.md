@@ -31,6 +31,7 @@ uv run pinyin-eval --config configs/minimal.yaml generate --tasks all --profile 
 uv run pinyin-eval --config configs/minimal.yaml score  --run-id mini-v1
 uv run pinyin-eval --config configs/minimal.yaml report --run-id mini-v1
 uv run pinyin-eval --config configs/minimal.yaml cost   --run-id mini-v1
+uv run pinyin-eval --config configs/minimal.yaml derive-detect --run-id mini-v1
 ```
 
 ## 1. 环境与连通性

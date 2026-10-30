@@ -364,6 +364,9 @@ class Pricing:  # pinyin_eval.pricing
   manifest `status="budget_exceeded"`、`counts.n_skipped_budget>0`，可用同一 run-id 续跑。
 * manifest 新增字段：`pricing`、`budget_cny`、`counts.{n_calls,cost_cny,input_tokens,
   output_tokens,reasoning_tokens,budget}`；report 输出 `usage.csv` + 成本节。
+* `pinyin-eval derive-detect --run-id <id>`：用同一音频的 exp3 自由识别预测与检测样本的
+  声称 target/tone 比较，输出 `derived_detection.csv` 与 `detection_derived.csv`
+  （模型判一致 vs 派生检测并排指标）；实现见 `pinyin_eval.derived_detection`。
 
 ## 12. 最小化实验设计（¥70 预算，v3 新增）
 

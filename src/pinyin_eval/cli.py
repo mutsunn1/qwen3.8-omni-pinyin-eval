@@ -124,6 +124,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-id", required=True)
     p.set_defaults(func=cmd_cost)
 
+    # derive-detect -------------------------------------------------------
+    p = sub.add_parser(
+        "derive-detect",
+        help="judge detection consistency from exp3 free-recognition predictions",
+    )
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--free-condition", default="free__think0__clean__json",
+                   help="generation condition whose exp3 free predictions are used as judge")
+    p.set_defaults(func=cmd_derive_detect)
+
     # report -------------------------------------------------------------
     p = sub.add_parser("report", help="write the markdown report and metric tables")
     p.add_argument("--run-id", required=True)
@@ -520,6 +530,73 @@ def cmd_score(args: argparse.Namespace) -> int:
     cfg = load_config(args)
     out = score_run(cfg, args.run_id)
     print(json.dumps(out["summary"], ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_derive_detect(args: argparse.Namespace) -> int:
+    import pandas as pd
+
+    from .derived_detection import compare_metrics, derive_rows, flat_table
+    from .normalize import load_mapping
+
+    cfg = load_config(args)
+    run_dir = cfg.path("paths.results_dir") / "runs" / args.run_id
+    items_path = run_dir / "items.parquet"
+    detection_path = run_dir / "detection_rows.parquet"
+    if not items_path.exists() or not detection_path.exists():
+        raise SystemExit(
+            f"missing analysis artifacts in {run_dir}; run `score --run-id {args.run_id}` first"
+        )
+    items = pd.read_parquet(items_path)
+    free = items[
+        (items["experiment"] == "exp3")
+        & (items["prompt_condition"] == "free")
+        & (items["condition_id"] == args.free_condition)
+    ]
+    if free.empty:
+        # fall back to whatever exp3 free condition this run actually has
+        # (mock/mini runs may use a different main condition, e.g. think1)
+        exp3_free = items[
+            (items["experiment"] == "exp3") & (items["prompt_condition"] == "free")
+        ]
+        candidates = sorted(exp3_free["condition_id"].dropna().unique())
+        preferred = "free__think0__clean__json"
+        if preferred in candidates:
+            chosen = preferred
+        elif candidates:
+            chosen = candidates[0]
+        else:
+            raise SystemExit(
+                f"no exp3 free items for condition {args.free_condition!r} in run {args.run_id}"
+            )
+        log.warning(
+            "free condition %r not in run; using %r instead",
+            args.free_condition, chosen,
+        )
+        free = exp3_free[exp3_free["condition_id"] == chosen]
+    detection = pd.read_parquet(detection_path)
+    mapping = load_mapping(cfg.path("paths.mapping_csv"))
+    derived = derive_rows(detection, free, mapping)
+    comparison = compare_metrics(derived)
+
+    keep = [
+        "item_id", "audio_id", "detection_subset", "detection_role", "given_target",
+        "given_tone", "claim_initial", "claim_final", "pred_initial_free",
+        "pred_final_free", "pred_tone_free", "pred_consistent", "derived_consistent",
+    ]
+    row_path = run_dir / "derived_detection.csv"
+    derived[[c for c in keep if c in derived.columns]].to_csv(row_path, index=False)
+    table_path = run_dir / "detection_derived.csv"
+    pd.DataFrame(flat_table(comparison)).to_csv(table_path, index=False)
+    payload = {
+        "run_id": args.run_id,
+        "free_condition": args.free_condition,
+        "n_detection_rows": int(len(derived)),
+        "comparison": comparison,
+        "artifacts": {"derived_detection.csv": str(row_path),
+                      "detection_derived.csv": str(table_path)},
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 

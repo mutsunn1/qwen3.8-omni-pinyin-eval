@@ -51,6 +51,9 @@ def test_cli_pipeline(cli_args, tiny_parquet_cfg):
     assert (run_dir / "items.parquet").exists()
     assert (run_dir / "detection_rows.parquet").exists()
     assert main(cli_args + ["cost", "--run-id", "cli-run"]) == 0
+    assert main(cli_args + ["derive-detect", "--run-id", "cli-run"]) == 0
+    assert (run_dir / "detection_derived.csv").exists()
+    assert (run_dir / "derived_detection.csv").exists()
     summary = json.loads((run_dir / "score_summary.json").read_text())
     assert summary["n_items"] > 0
     assert summary["parse_status"].get("ok", 0) == summary["n_items"]

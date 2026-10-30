@@ -25,7 +25,8 @@
 > 真实 API 已打通（2026-10-29/30）：smoke + pilot 通过；**两档最小化实验已完成**：
 > `mini3-v1`（96 target / 1,536 音频 / 59,968 次 / ¥12.37）与 `mini128-v1`
 > （128 target / 2,048 音频 / 79,680 次 / ¥16.78）；累计花费 **¥30.60 / ¥70（43.7%）**。
-> 结果摘要：[mini3-v1](docs/results-minimal-v1.md)、[mini128-v1](docs/results-minimal-128.md)。
+> 汇总报告：[**最小化实验报告**](docs/minimal-experiment-report.md)；
+> 分档摘要：[mini3-v1](docs/results-minimal-v1.md)、[mini128-v1](docs/results-minimal-128.md)。
 > 设计快照：`docs/experiment-design.md`（v3, 2026-10-28 20:37）。
 > **另有 ¥70 预算的最小化实验设计**：[docs/experiment-design-minimal.md](docs/experiment-design-minimal.md)
 > （4 个生成条件、59,968 次调用、预期 ¥19 / 最坏 ¥50，硬预算 70；见 §2.1）。
@@ -119,6 +120,8 @@ uv run pinyin-eval --config configs/minimal.yaml generate --tasks all --profile 
 uv run pinyin-eval --config configs/minimal.yaml score  --run-id mini-v1
 uv run pinyin-eval --config configs/minimal.yaml report --run-id mini-v1
 uv run pinyin-eval --config configs/minimal.yaml cost   --run-id mini-v1
+uv run pinyin-eval --config configs/minimal.yaml derive-detect --run-id mini-v1
+# derive-detect = 用 exp3 自由识别预测与声称 target 程序化比较（无需额外调用）
 ```
 
 * 数据：1,536 条分层音频（96 target × 4 voice × 4 tone）+ 7 类最小对各 48 实例；
@@ -233,6 +236,7 @@ exp5 `{"final"}`、exp6 `{"tone"}`）。**v3 已取消 A/B 任务。** 主指标
 configs/base.yaml              # 完整设计配置（数据/模型/任务/统计/计费）
 configs/minimal.yaml           # ¥70 最小化设计配置（继承 base）
 docs/experiment-design-minimal.md  # 最小化实验设计（v3, ¥70 预算）
+docs/minimal-experiment-report.md  # 两档最小化实验汇总报告（可引用）
 docs/results-minimal-v1.md     # 最小化实验真实运行结果（run mini3-v1）
 docs/results-minimal-128.md    # 升级档运行结果（run mini128-v1，2,048 音频）
 configs/minimal-128.yaml       # 128 target 升级档配置（递归 extends 示例）
