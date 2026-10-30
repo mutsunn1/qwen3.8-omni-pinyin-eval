@@ -105,6 +105,51 @@ DETECT_PROMPT = """音频：一段普通话单音节。
 请判断目标拼音和声调是否与音频中的实际发音一致。
 {format_instruction}"""
 
+# --- detection prompt probes (over-flagging bias, FPR 0.76 in run mini3-v1) ---
+# v1: explicit decision threshold — only clear mismatches count as inconsistent
+DETECT_PROMPT_V1 = """音频：一段普通话单音节。
+目标拼音：{target}
+目标声调：{target_tone}
+
+请判断目标拼音和声调是否与音频中的实际发音一致。
+判定标准：只有当目标拼音（声母或韵母）或目标声调与音频中的实际发音确实不同时，
+才判为不一致；如果目标拼音和声调都能与音频对应（即使存在轻微音质、语速或口音差异），
+判为一致。
+{format_instruction}"""
+
+# v2: decompose into pinyin / tone match, then aggregate
+DETECT_PROMPT_V2 = """音频：一段普通话单音节。
+目标拼音：{target}
+目标声调：{target_tone}
+
+请先分别判断目标拼音（声母+韵母）和目标声调是否与音频中的实际发音一致，
+再给出总体判断（两项都一致 -> consistent=true；任一不一致 -> consistent=false）。
+{format_instruction}"""
+
+# v3: strict comparison wording
+DETECT_PROMPT_V3 = """音频：一段普通话单音节。
+目标拼音：{target}
+目标声调：{target_tone}
+
+请把目标拼音（声母+韵母）和目标声调分别与音频中的实际发音核对：
+完全相同则判为一致；任何声母、韵母或声调不同则判为不一致；
+音质、音量、语速差异不算不一致。
+{format_instruction}"""
+
+DETECT_PROMPT_VARIANTS: dict[str, str] = {
+    "v0": DETECT_PROMPT,
+    "v1": DETECT_PROMPT_V1,
+    "v2": DETECT_PROMPT_V2,
+    "v3": DETECT_PROMPT_V3,
+}
+
+#: v2 uses a richer JSON schema (parser still reads the `consistent` field)
+DETECT_V2_JSON_FORMAT = (
+    '只输出一个 JSON 对象，不要使用 Markdown 代码块，不要添加任何解释。'
+    '输出格式：{"pinyin_match": true|false, "tone_match": true|false, '
+    '"consistent": true|false}'
+)
+
 
 # ---------------------------------------------------------------------------
 # Construction
@@ -151,7 +196,13 @@ def build_prompt_text(task: TaskItem, output_form: str) -> str:
     if kind == "detect":
         if task.given_target is None or task.given_tone is None:
             raise ValueError(f"detect task {task.item_id} needs target and target_tone")
-        return DETECT_PROMPT.format(
+        variant = getattr(task, "prompt_variant", "v0")
+        template = DETECT_PROMPT_VARIANTS.get(variant)
+        if template is None:
+            raise ValueError(f"unknown detection prompt variant {variant!r}")
+        if variant == "v2" and output_form == "json":
+            fmt = DETECT_V2_JSON_FORMAT
+        return template.format(
             target=task.given_target, target_tone=int(task.given_tone),
             format_instruction=fmt,
         )
@@ -242,6 +293,7 @@ def describe_prompts() -> dict[str, Any]:
 
 __all__ = [
     "DETECT_PROMPT",
+    "DETECT_PROMPT_VARIANTS",
     "DIMENSION_WORD",
     "FORMAT_JSON_BASE",
     "FORMAT_TEXT_BASE",

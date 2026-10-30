@@ -120,6 +120,8 @@ tasks:
     strata_per_voice_tone: 16
   # 检测实验（2026-10-28 新增）：给定 target（无调）+ target_tone，只输出一致性。
   detection:
+    # v0 = 设计文档 prompt；v1/v2/v3 = “过度判不一致”偏置探针（见 docs/decisions.md）
+    prompt_variant: v0
     # 每个音频：1 个一致样本 + 5 个不一致变体（2 改声母 / 2 改韵母 / 1 改声调）
     n_initial_variants: 2
     n_final_variants: 2

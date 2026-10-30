@@ -125,6 +125,16 @@ def test_detection_task_structure(detection_tasks):
     assert len(detection_tasks) == _n_audio() * 6 - 2 * 16 * 2
 
 
+def test_detection_prompt_variant_from_config(full_records, repo_cfg, mapping):
+    cfg = repo_cfg.with_overrides({"tasks": {"detection": {"prompt_variant": "v2"}}})
+    tasks = T.build_detection_tasks(full_records[:2], cfg, mapping)
+    assert tasks and all(t.prompt_variant == "v2" for t in tasks)
+    assert all('"pinyin_match"' in t.prompt_texts["json"] for t in tasks)
+    # default config still uses v0
+    default = T.build_detection_tasks(full_records[:1], repo_cfg, mapping)
+    assert default[0].prompt_variant == "v0"
+
+
 def test_detection_claims(detection_tasks):
     n_consistent = 0
     for task in detection_tasks:

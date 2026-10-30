@@ -121,6 +121,18 @@
 * 未受影响：HuggingFace/GitHub 在本机被系统代理拦截（Clash 主节点故障），
   但数据与任务清单已在本地，实验不受影响；需要访问 GitHub 时临时关闭代理。
 
+### 8.3 检测偏置专项（2026-10-30）
+
+* 背景：`mini3-v1` 检测 FPR=0.764（一致样本 76% 被判不一致）。
+* Prompt 探针：`configs/probe-detect-v{1,2,3}.yaml`（512 音频 ×6 任务，独立 task dir
+  `data/manifests/tasks-probe-v*`，共 9,216 次调用 ≈ ¥1.45）。配对比较显示 v1/v2/v3
+  均未改善（FPR 0.850/0.982/0.832 vs 基线 0.805）。
+* **决策**：完整实验的检测部分改用“自由识别 → 程序比较”派生检测（与声称 target 的
+  initial/final/tone 比较），Error-F1 **0.720 → 0.908**、FPR **0.764 → 0.193**，
+  零额外调用；模型直接一致性判定仅作为辅助口径报告。
+* 复现：`.venv/bin/python scripts/analyze_detection_probe.py`（读取 runs 下
+  `mini3-v1` / `probe-detect-v*` 的 detection_rows）。
+
 ### 8.2 最小化主实验完成（run mini3-v1，2026-10-29/30）
 
 * 59,968 计划调用全部完成（100%），解析失败 **0**；10 条瞬态 400 经 resume 重试成功。

@@ -130,6 +130,25 @@ def test_detect_prompt():
     assert '"consistent"' in text
 
 
+def test_detection_prompt_variants():
+    texts = {v: build_prompt_text(make_task(
+        "detect", experiment="detect", prompt_condition="detect",
+        given_target="zhang", given_tone=1, prompt_variant=v,
+    ), "json") for v in ("v0", "v1", "v2", "v3")}
+    assert len(set(texts.values())) == 4  # each variant is a distinct request
+    assert "判定标准" in texts["v1"]
+    assert '"pinyin_match"' in texts["v2"]
+    assert "音质、音量、语速差异不算不一致" in texts["v3"]
+    # v0 == design-doc prompt
+    assert "请判断目标拼音和声调是否与音频中的实际发音一致" in texts["v0"]
+    # unknown variant is rejected
+    with pytest.raises(ValueError):
+        build_prompt_text(make_task(
+            "detect", experiment="detect", prompt_condition="detect",
+            given_target="zhang", given_tone=1, prompt_variant="v9",
+        ), "json")
+
+
 def test_no_ab_task_type():
     with pytest.raises(ValueError):
         make_task("ab")

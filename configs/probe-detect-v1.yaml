@@ -1,0 +1,17 @@
+# Over-flagging probe: detection prompt variant v1 (see docs/decisions.md).
+# Small 512-audio subset (~3k calls, <¥0.5); separate task dir so the main
+# catalogs are untouched.
+extends: configs/base.yaml
+project:
+  name: detect-probe-v1
+paths:
+  task_dir: data/manifests/tasks-probe-v1
+generation:
+  main_condition:
+    thinking: false
+    audio_quality: clean
+    output_form: json
+  budget_cny: 70
+tasks:
+  detection:
+    prompt_variant: v1

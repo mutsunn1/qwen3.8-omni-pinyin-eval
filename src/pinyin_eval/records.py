@@ -173,7 +173,8 @@ class TaskItem:
     alternatives: list[str] | None = None
     correct_choice: str | None = None
     stratum: str = ""                        # voice|tone, for stratified sampling
-    task_type: str = ""                      # free | tone | detect | ab (output schema)
+    task_type: str = ""                      # free | tone | initial | final | detect
+    prompt_variant: str = "v0"               # detection prompt probe variant
     prompt_texts: dict[str, str] | None = None   # {"json":..., "text":...} built by tasks.py
     system_prompt: str = ""                  # shared system prompt (part of request id)
     prompt_version: str = ""

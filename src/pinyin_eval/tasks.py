@@ -313,10 +313,12 @@ def build_detection_tasks(
     n_init = int(det_cfg.get("n_initial_variants", 2))
     n_final = int(det_cfg.get("n_final_variants", 2))
     n_tone = int(det_cfg.get("n_tone_variants", 1))
+    prompt_variant = str(det_cfg.get("prompt_variant", "v0"))
 
     tasks: list[TaskItem] = []
     for record in sorted(records, key=lambda r: r.audio_id):
         base = _base_fields(record)
+        base["prompt_variant"] = prompt_variant
 
         # consistent negative sample: original target + true tone
         tasks.append(_with_prompts(TaskItem(
