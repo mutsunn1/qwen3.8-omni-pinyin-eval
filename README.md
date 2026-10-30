@@ -28,7 +28,8 @@
 > 声学基线：SDHY P0-v2（wav2vec2-XLSR + M1/X2 头）已下载并评测，
 > 见 [docs/baseline-sdhy.md](docs/baseline-sdhy.md)（2,048 音频：initial 0.60 /
 > final 0.75 / tone 0.70 / joint 0.30；Qwen 对应 0.96 / 0.94 / 0.91 / 0.83）。
-> 一页汇总：[**最简实验报告**](docs/report-minimal.md) · 详细版：[最小化实验报告](docs/minimal-experiment-report.md)；
+> 一页汇总：[**最简实验报告**](docs/report-minimal.md) · 详细版：[最小化实验报告](docs/minimal-experiment-report.md)
+> · 三模型弱项对比：[model-weakness-comparison.md](docs/model-weakness-comparison.md)；
 > 分档摘要：[mini3-v1](docs/results-minimal-v1.md)、[mini128-v1](docs/results-minimal-128.md)。
 > 设计快照：`docs/experiment-design.md`（v3, 2026-10-28 20:37）。
 > **另有 ¥70 预算的最小化实验设计**：[docs/experiment-design-minimal.md](docs/experiment-design-minimal.md)
@@ -243,6 +244,7 @@ docs/report-minimal.md         # 最简实验报告（一页/lite 版）
 docs/minimal-experiment-report.md  # 两档最小化实验汇总报告（详细）
 docs/baseline-sdhy.md          # SDHY P0-v2 声学基线（下载/适配/评测结果）
 docs/baseline-ise.md           # 讯飞 ISE 流式评测基线（鉴权/适配/结果）
+docs/model-weakness-comparison.md  # 三模型弱项对比（Qwen vs SDHY vs 讯飞 ISE）
 scripts/eval_xfyun_ise.py      # 讯飞 ISE 评测脚本（候选打分，可断点续跑）
 scripts/probe_xfyun_ise.py     # 讯飞 ISE 单条探针
 scripts/eval_sdhy_baseline.py  # 基线评测脚本（需 third_party 基线环境）
