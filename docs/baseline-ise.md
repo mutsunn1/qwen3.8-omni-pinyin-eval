@@ -4,6 +4,7 @@
 > Qwen3.8-Omni、SDHY P0-v2 在最小化实验同一批音频上对比。
 > 日期：2026-10-30 · 评测脚本：[scripts/eval_xfyun_ise.py](../scripts/eval_xfyun_ise.py)
 > · 协议探针：[scripts/probe_xfyun_ise.py](../scripts/probe_xfyun_ise.py)
+> · **完整细节（接口/协议/适配/交互账目/全量结果）**：[baseline-ise-detail.md](baseline-ise-detail.md)
 
 ## 1. 接口与鉴权（已实测打通）
 
