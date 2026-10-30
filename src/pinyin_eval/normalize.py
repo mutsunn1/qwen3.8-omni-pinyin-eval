@@ -30,6 +30,22 @@ ZERO_INITIAL_RULES: dict[str, str] = {
     "ün": "yun",
 }
 
+#: y/w 拼写 surface -> 规范 (initial, final)。模型在 JSON 里常把 ye 拆成
+#: ("y","e")、把 zhi 拆成 ("zh","")；这些 surface 必须显式折算，否则
+#: 零声母和舌尖元音会被系统性判错（实测 mini128 上影响 ~5% final）。
+YW_SURFACE_RULES: dict[str, tuple[str, str]] = {
+    "yi": ("", "i"), "ya": ("", "ia"), "ye": ("", "ie"), "yao": ("", "iao"),
+    "you": ("", "iu"), "yan": ("", "ian"), "yin": ("", "in"),
+    "yang": ("", "iang"), "ying": ("", "ing"), "yong": ("", "iong"),
+    "yu": ("", "ü"), "yue": ("", "üe"), "yuan": ("", "üan"), "yun": ("", "ün"),
+    "wu": ("", "u"), "wa": ("", "ua"), "wo": ("", "uo"), "wai": ("", "uai"),
+    "wei": ("", "ui"), "wan": ("", "uan"), "wen": ("", "un"),
+    "wang": ("", "uang"), "weng": ("", "ueng"),
+}
+
+#: 舌尖元音声母：模型只给声母、final 留空时补 i（zhi/chi/shi/ri/zi/ci/si）
+APICAL_INITIALS = frozenset({"zh", "ch", "sh", "r", "z", "c", "s"})
+
 #: 21 个声母（不含零声母），按长度降序用于贪心切分
 INITIALS: tuple[str, ...] = (
     "zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h",
@@ -218,6 +234,8 @@ def normalize_yw_surface(syllable: str, mapping: dict[str, MappingEntry]) -> tup
     spellings (source == "y"/"w"/"merged"/"final"), so we do not hardcode it.
     """
     syllable = syllable.strip().lower()
+    if syllable in YW_SURFACE_RULES:
+        return YW_SURFACE_RULES[syllable]
     entry = mapping.get(syllable)
     if entry is not None and syllable != "":
         if entry.initial == "" and entry.source in {"y", "w", "final", "merged"}:
@@ -263,8 +281,14 @@ def normalize_output_pair(
     raw_final = normalize_final(final)
     known_finals = {entry.final for entry in mapping.values()}
 
-    # full syllable written into one field
+    # full syllable written into one field / model split the syllable
     if raw_initial and not raw_final:
+        if raw_initial in INITIALS:
+            # zhi/chi/shi/ri/zi/ci/si: the apical vowel is part of the initial
+            if raw_initial in APICAL_INITIALS:
+                return raw_initial, "i"
+            # consonant-only answer: keep the (possibly correct) initial, no final
+            return raw_initial, ""
         return normalize_syllable(raw_initial, mapping)
     if raw_final and not raw_initial:
         if raw_final in known_finals:
@@ -273,9 +297,15 @@ def normalize_output_pair(
     if not raw_initial and not raw_final:
         return "", ""
 
-    # y/w are not initials: rewrite through the mapping table
+    # y/w are not initials: rewrite through the explicit surface table first
     if raw_initial in {"y", "w"}:
-        return normalize_syllable(raw_initial + raw_final, mapping)
+        surface = raw_initial + raw_final
+        if surface in YW_SURFACE_RULES:
+            return YW_SURFACE_RULES[surface]
+        # if the final is already canonical (e.g. model said ("y","ie")), keep it
+        if raw_final in known_finals:
+            return "", _final_canonicalisation(raw_final, "")
+        return normalize_yw_surface(surface, mapping)
 
     initial_n = raw_initial
     final_n = _final_canonicalisation(raw_final, initial_n)

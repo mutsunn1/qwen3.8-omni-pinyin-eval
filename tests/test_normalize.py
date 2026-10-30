@@ -110,6 +110,26 @@ def test_normalize_output_pair_yw_surface(mapping):
     assert normalize_output_pair("w", "ei", mapping) == ("", "ui")
 
 
+def test_normalize_output_pair_split_yw_surface(mapping):
+    # model writes the y/w surface split into initial+final
+    assert normalize_output_pair("y", "e", mapping) == ("", "ie")
+    assert normalize_output_pair("y", "ie", mapping) == ("", "ie")
+    assert normalize_output_pair("y", "u", mapping) == ("", "ü")
+    assert normalize_output_pair("y", "uan", mapping) == ("", "üan")
+    assert normalize_output_pair("w", "o", mapping) == ("", "uo")
+
+
+def test_normalize_output_pair_apical_with_empty_final(mapping):
+    # zhi/chi/shi/ri/zi/ci/si: the apical vowel is often put in the initial
+    for initial in ("zh", "ch", "sh", "r", "z", "c", "s"):
+        assert normalize_output_pair(initial, "", mapping) == (initial, "i")
+        assert normalize_output_pair(initial, None, mapping) == (initial, "i")
+
+
+def test_normalize_output_pair_consonant_only_keeps_initial(mapping):
+    assert normalize_output_pair("q", "", mapping) == ("q", "")
+
+
 def test_normalize_output_pair_full_syllable_in_one_field(mapping):
     assert normalize_output_pair("zhang", "", mapping) == ("zh", "ang")
     assert normalize_output_pair("", "zhang", mapping) == ("zh", "ang")

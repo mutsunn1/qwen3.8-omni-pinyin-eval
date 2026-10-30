@@ -71,6 +71,8 @@ def main() -> int:
     parser.add_argument("--audio-manifest", default="data/manifests/audio.parquet")
     parser.add_argument("--output", default="results/baseline-sdhy-min128.json")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--audio-ids-file", default=None,
+                        help="evaluate these audio ids instead of the task-dir subset")
     parser.add_argument("--calibration-size", type=int, default=512)
     args = parser.parse_args()
 
@@ -87,7 +89,11 @@ def main() -> int:
     mapping = load_mapping(ROOT / "data/mapping/mandarin_tone_syn_target_mapping.csv")
     task_dir = ROOT / args.task_dir
     summary = json.loads((task_dir / "minimal_summary.json").read_text(encoding="utf-8"))
-    eval_audios = list(summary["audio_ids"])
+    if args.audio_ids_file:
+        eval_audios = [line.strip() for line in Path(args.audio_ids_file).read_text().splitlines()
+                       if line.strip()]
+    else:
+        eval_audios = list(summary["audio_ids"])
     if args.limit:
         eval_audios = eval_audios[: args.limit]
     eval_set = set(eval_audios)
@@ -239,6 +245,8 @@ def main() -> int:
     for row in main.itertuples():
         for role, item_id in (("neg", row.negative_item_id), ("pos", row.positive_item_id)):
             task = detection_tasks.loc[item_id]
+            if row.audio_id not in lookup.index:
+                continue
             pred = lookup.loc[row.audio_id]
             claim = mapping.get(task["given_target"])
             claimed_initial = claim.initial if claim else None
@@ -252,12 +260,14 @@ def main() -> int:
                 "detection_role": role,
                 "pred_consistent": bool(consistent),
             })
-    detection = detection_metrics(detection_rows)
+    detection = detection_metrics(detection_rows) if detection_rows else None
     result = {
         "baseline": "SDHY evaluater_speaking_0.1 P0-v2 (adapted free recognition)",
         "encoder": {"model_id": "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
                     "weights_sha256": WEIGHT_SHA, "compute_mode": encoder.compute_mode},
-        "subset": {"task_dir": args.task_dir, "n_audios": len(frame)},
+        "subset": {"task_dir": args.task_dir,
+                   "audio_source": args.audio_ids_file or task_dir.name,
+                   "n_audios": len(frame)},
         "tone_classifier": {"rise_th": rise_th, "range_th": range_th,
                             "height_th": height_th,
                             "calibration_acc": best[0] / len(calib_feats)},
