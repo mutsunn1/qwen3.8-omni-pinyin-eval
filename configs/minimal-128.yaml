@@ -1,0 +1,15 @@
+# Minimal design, upgraded tier: 128 targets (2,048 audios) + 64 instances/type.
+# Run after the 96-target minimal run to tighten CIs (~2% -> ~1.7%).
+# Expected ~79.7k calls; at measured unit costs ≈ ¥16 (hard budget 55 here,
+# so total spend across mini3-v1 + probes + this run stays <= ¥70).
+extends: configs/minimal.yaml
+project:
+  name: minimal-xl-128
+paths:
+  task_dir: data/manifests/tasks-min128
+generation:
+  # total experiment budget is ¥70; ~¥13.8 already spent, so cap this run at ¥55
+  budget_cny: 55
+minimal:
+  n_targets: 128
+  pair_instances_per_type: 64

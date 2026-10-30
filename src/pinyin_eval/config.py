@@ -83,6 +83,34 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def _load_with_extends(path: str | Path, *, _seen: frozenset[Path] = frozenset()) -> dict[str, Any]:
+    """Load a YAML config and resolve ``extends`` recursively (single inheritance).
+
+    ``extends: configs/base.yaml`` is resolved relative to the repo root first
+    (i.e. ``config_path.parent.parent`` for configs living in ``configs/``) and
+    then relative to the config's own directory.  Cycles are rejected.
+    """
+    config_path = Path(path)
+    resolved = config_path.resolve()
+    if resolved in _seen:
+        raise ConfigError(f"config extends cycle detected: {config_path}")
+    raw = _load_yaml(config_path)
+    parent = raw.pop("extends", None)
+    if parent:
+        parent_path = Path(str(parent))
+        if not parent_path.is_absolute():
+            candidates = [
+                config_path.parent.parent / parent_path,
+                config_path.parent / parent_path,
+            ]
+            parent_path = next((c for c in candidates if c.exists()), candidates[0])
+        if not parent_path.exists():
+            raise ConfigError(f"parent config not found: {parent} (from {config_path})")
+        base_raw = _load_with_extends(parent_path, _seen=_seen | {resolved})
+        raw = _deep_merge(base_raw, raw)
+    return raw
+
+
 class Config:
     """Thin wrapper around a nested dict with dotted-path access."""
 
@@ -106,18 +134,8 @@ class Config:
             raise ConfigError(f"config file not found: {config_path}")
         with config_path.open("r", encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
-        # optional single inheritance: ``extends: configs/base.yaml``
-        parent = raw.pop("extends", None)
-        if parent:
-            parent_path = Path(parent)
-            if not parent_path.is_absolute():
-                parent_path = config_path.parent.parent / parent_path
-            if not parent_path.exists():
-                parent_path = config_path.parent / parent_path
-            if not parent_path.exists():
-                raise ConfigError(f"parent config not found: {parent} (from {config_path})")
-            base_raw = _load_yaml(parent_path)
-            raw = _deep_merge(base_raw, raw)
+        # optional inheritance chain: ``extends: configs/base.yaml``
+        raw = _load_with_extends(config_path)
         if overrides:
             raw = _deep_merge(raw, overrides)
         root = Path(repo_root) if repo_root is not None else Path.cwd()

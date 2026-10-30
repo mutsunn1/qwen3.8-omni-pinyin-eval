@@ -16,7 +16,11 @@ target), which needs no extra API calls and yields F1 0.908 / FPR 0.193.
 
 Usage::
 
-    PYTHONPATH=src python scripts/analyze_detection_probe.py
+    PYTHONPATH=src python scripts/analyze_detection_probe.py [RUN_ID]
+
+``RUN_ID`` defaults to ``mini3-v1`` (the main minimal run).  Probe runs are
+compared only when their ``detection_rows.parquet`` exists (they are local
+artifacts, not committed).
 """
 
 from __future__ import annotations
@@ -93,9 +97,9 @@ def paired_probe_comparison() -> dict[str, dict]:
     return out
 
 
-def main() -> None:
-    print("== derived detection from free recognition (run mini3-v1) ==")
-    derived = derived_detection()
+def main(run_id: str = "mini3-v1") -> None:
+    print(f"== derived detection from free recognition (run {run_id}) ==")
+    derived = derived_detection(run_id)
     judged = metrics(load_main("mini3-v1"))
     for name, m in (("model judgment", judged), ("derived (free recognition)", derived)):
         print(
@@ -109,13 +113,14 @@ def main() -> None:
             f"{name:14s} F1={m['error_f1']:.3f} FPR={m['fpr']:.3f} "
             f"recall={m['error_recall']:.3f} acc={m['accuracy']:.3f} (n={m['n_neg']})"
         )
-    out = {"derived": derived, "model_judgment": judged, "probes": probes}
-    (ROOT / "results" / "detection-probe-summary.json").write_text(
-        json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    print(f"\nwrote {ROOT / 'results/detection-probe-summary.json'}")
+    out = {"run_id": run_id, "derived": derived, "model_judgment": judged, "probes": probes}
+    target = ROOT / "results" / f"detection-probe-summary-{run_id}.json"
+    target.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\nwrote {target}")
     print("\nNOTE: results/ is gitignored; this script is the reproducible entry point.")
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    main(sys.argv[1] if len(sys.argv) > 1 else "mini3-v1")

@@ -96,6 +96,27 @@ def test_config_extends_minimal_design():
     assert mini.get("pricing.input_per_mtok") == 0.8
 
 
+def test_config_extends_chain_minimal_128():
+    # configs/minimal-128.yaml -> configs/minimal.yaml -> configs/base.yaml
+    cfg = Config.load(REPO_ROOT / "configs" / "minimal-128.yaml", repo_root=REPO_ROOT)
+    assert cfg.get("minimal.n_targets") == 128
+    assert cfg.get("minimal.pair_instances_per_type") == 64
+    assert cfg.get("generation.budget_cny") == 55
+    assert cfg.get("paths.task_dir") == "data/manifests/tasks-min128"
+    # inherited from base through two levels
+    assert cfg.model_name == "qwen3.8-omni-flash"
+    assert cfg.path("paths.mapping_csv").name == "mandarin_tone_syn_target_mapping.csv"
+
+
+def test_config_extends_cycle_raises(tmp_path):
+    a = tmp_path / "a.yaml"
+    b = tmp_path / "b.yaml"
+    a.write_text("extends: b.yaml\nproject: {name: a}\n", encoding="utf-8")
+    b.write_text("extends: a.yaml\nproject: {name: b}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="cycle"):
+        Config.load(a, repo_root=tmp_path)
+
+
 def test_config_extends_missing_parent_raises(tmp_path):
     child = tmp_path / "child.yaml"
     child.write_text("extends: missing.yaml\nproject:\n  name: x\n", encoding="utf-8")
