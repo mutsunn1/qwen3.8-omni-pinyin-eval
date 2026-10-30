@@ -100,7 +100,7 @@ def paired_probe_comparison() -> dict[str, dict]:
 def main(run_id: str = "mini3-v1") -> None:
     print(f"== derived detection from free recognition (run {run_id}) ==")
     derived = derived_detection(run_id)
-    judged = metrics(load_main("mini3-v1"))
+    judged = metrics(load_main(run_id))
     for name, m in (("model judgment", judged), ("derived (free recognition)", derived)):
         print(
             f"{name:28s} F1={m['error_f1']:.3f} FPR={m['fpr']:.3f} "

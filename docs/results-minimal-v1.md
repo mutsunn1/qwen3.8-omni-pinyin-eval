@@ -1,6 +1,7 @@
 # Qwen3.8-Omni 最小化实验 · 结果摘要（run mini3-v1）
 
 > 运行时间：2026-10-29 20:57 → 2026-10-30 10:25（中途因会话结束中断后续跑）
+> 升级档（2,048 音频）结果见 [results-minimal-128.md](results-minimal-128.md)。
 > 设计：[最小化实验设计（¥70）](experiment-design-minimal.md) · 配置：`configs/minimal.yaml`
 > 模型：`qwen3.8-omni-flash`（华北2 业务空间）；prompt `p3.1`；解码 temp=0, top_p=1,
 > max_tokens=256

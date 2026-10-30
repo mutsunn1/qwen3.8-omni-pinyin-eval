@@ -22,9 +22,10 @@
 > 取消 A/B、实验四~六改为三个子实验、检测实验不参与消融）实现，离线测试全绿；
 > `all-mock` 可在无 API key 的情况下跑通
 > `prepare-data → build-tasks → generate(mock) → score → report` 全链路。
-> 真实 API 已打通（2026-10-29/30）：smoke + pilot 通过；**最小化主实验 `mini3-v1` 已完成**
-> （59,968 次调用，解析 100%，实际花费 **¥12.37 / 预算 ¥70**，17.7%）。
-> 结果摘要：[docs/results-minimal-v1.md](docs/results-minimal-v1.md)。
+> 真实 API 已打通（2026-10-29/30）：smoke + pilot 通过；**两档最小化实验已完成**：
+> `mini3-v1`（96 target / 1,536 音频 / 59,968 次 / ¥12.37）与 `mini128-v1`
+> （128 target / 2,048 音频 / 79,680 次 / ¥16.78）；累计花费 **¥30.60 / ¥70（43.7%）**。
+> 结果摘要：[mini3-v1](docs/results-minimal-v1.md)、[mini128-v1](docs/results-minimal-128.md)。
 > 设计快照：`docs/experiment-design.md`（v3, 2026-10-28 20:37）。
 > **另有 ¥70 预算的最小化实验设计**：[docs/experiment-design-minimal.md](docs/experiment-design-minimal.md)
 > （4 个生成条件、59,968 次调用、预期 ¥19 / 最坏 ¥50，硬预算 70；见 §2.1）。
@@ -233,6 +234,8 @@ configs/base.yaml              # 完整设计配置（数据/模型/任务/统�
 configs/minimal.yaml           # ¥70 最小化设计配置（继承 base）
 docs/experiment-design-minimal.md  # 最小化实验设计（v3, ¥70 预算）
 docs/results-minimal-v1.md     # 最小化实验真实运行结果（run mini3-v1）
+docs/results-minimal-128.md    # 升级档运行结果（run mini128-v1，2,048 音频）
+configs/minimal-128.yaml       # 128 target 升级档配置（递归 extends 示例）
 docs/experiment-design.md      # 设计文档冻结快照
 docs/contracts.md              # 模块间冻结契约（数据结构、函数签名、计数验收）
 docs/decisions.md              # 关键决策与设计文档歧义的处理记录
