@@ -121,6 +121,20 @@
 * 未受影响：HuggingFace/GitHub 在本机被系统代理拦截（Clash 主节点故障），
   但数据与任务清单已在本地，实验不受影响；需要访问 GitHub 时临时关闭代理。
 
+### 8.5 外部声学基线：SDHY P0-v2（2026-10-30）
+
+* 从 `CHAO-AI-Lab/SDHY_Test_System@61b2d05` 拉取 `evaluater_speaking_0.1`；编码器
+  `jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn`（sha256 de031fd4…，与
+  `models/p0-baseline.json` 一致），X2/M1 头随仓库发布。
+* 本机无 CUDA，用 cpu-fp32 跑；官方标定是 cuda-fp16（不宣称完全等价）。
+* 该产品链路是**已知 target 的评测**，本实验需要自由识别 → 适配：initial=M1 CTC
+  首音素、final=X2 头逐帧最大、tone=其 F0 特征 + 在不相交 512 条上校准的 4 类规则。
+* 结果（2,048 音频，同 mini128-v1 子集）：initial 0.600 / final 0.746 / tone 0.699 /
+  joint 0.299；派生检测 F1 0.731 / FPR 0.701；Qwen 对应 0.959/0.939/0.912/0.830、
+  0.918/0.170。详见 `docs/baseline-sdhy.md`。
+* 结论：该基线可作为“声学编码器 + 小头”的对照，但自由识别是适配口径，不能把差距
+  直接解读为产品能力差距。
+
 ### 8.4 升级档验证（run mini128-v1，2026-10-30）
 
 * 128 target / 2,048 音频 / 79,680 次调用，实际 **¥16.78**（累计 ¥30.60/¥70）。

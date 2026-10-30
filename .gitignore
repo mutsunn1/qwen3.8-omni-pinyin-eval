@@ -15,3 +15,6 @@ __pycache__/
 .DS_Store
 # local env
 .env
+
+# third-party baseline checkout + models (not versioned)
+third_party/

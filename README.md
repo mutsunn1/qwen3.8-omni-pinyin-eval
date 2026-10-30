@@ -25,6 +25,9 @@
 > 真实 API 已打通（2026-10-29/30）：smoke + pilot 通过；**两档最小化实验已完成**：
 > `mini3-v1`（96 target / 1,536 音频 / 59,968 次 / ¥12.37）与 `mini128-v1`
 > （128 target / 2,048 音频 / 79,680 次 / ¥16.78）；累计花费 **¥30.60 / ¥70（43.7%）**。
+> 声学基线：SDHY P0-v2（wav2vec2-XLSR + M1/X2 头）已下载并评测，
+> 见 [docs/baseline-sdhy.md](docs/baseline-sdhy.md)（2,048 音频：initial 0.60 /
+> final 0.75 / tone 0.70 / joint 0.30；Qwen 对应 0.96 / 0.94 / 0.91 / 0.83）。
 > 汇总报告：[**最小化实验报告**](docs/minimal-experiment-report.md)；
 > 分档摘要：[mini3-v1](docs/results-minimal-v1.md)、[mini128-v1](docs/results-minimal-128.md)。
 > 设计快照：`docs/experiment-design.md`（v3, 2026-10-28 20:37）。
@@ -237,6 +240,8 @@ configs/base.yaml              # 完整设计配置（数据/模型/任务/统�
 configs/minimal.yaml           # ¥70 最小化设计配置（继承 base）
 docs/experiment-design-minimal.md  # 最小化实验设计（v3, ¥70 预算）
 docs/minimal-experiment-report.md  # 两档最小化实验汇总报告（可引用）
+docs/baseline-sdhy.md          # SDHY P0-v2 声学基线（下载/适配/评测结果）
+scripts/eval_sdhy_baseline.py  # 基线评测脚本（需 third_party 基线环境）
 docs/results-minimal-v1.md     # 最小化实验真实运行结果（run mini3-v1）
 docs/results-minimal-128.md    # 升级档运行结果（run mini128-v1，2,048 音频）
 configs/minimal-128.yaml       # 128 target 升级档配置（递归 extends 示例）
