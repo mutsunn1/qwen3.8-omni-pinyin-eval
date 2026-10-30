@@ -3,7 +3,7 @@ data/raw/
 data/audio/
 data/noisy/
 data/manifests/
-data/ise/      # iFlytek ISE padded audio + call cache (local, derivable)
+data/ise/
 # results (regenerable)
 results/
 # python
