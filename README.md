@@ -241,6 +241,9 @@ configs/minimal.yaml           # ¥70 最小化设计配置（继承 base）
 docs/experiment-design-minimal.md  # 最小化实验设计（v3, ¥70 预算）
 docs/minimal-experiment-report.md  # 两档最小化实验汇总报告（可引用）
 docs/baseline-sdhy.md          # SDHY P0-v2 声学基线（下载/适配/评测结果）
+docs/baseline-ise.md           # 讯飞 ISE 流式评测基线（鉴权/适配/结果）
+scripts/eval_xfyun_ise.py      # 讯飞 ISE 评测脚本（候选打分，可断点续跑）
+scripts/probe_xfyun_ise.py     # 讯飞 ISE 单条探针
 scripts/eval_sdhy_baseline.py  # 基线评测脚本（需 third_party 基线环境）
 docs/results-minimal-v1.md     # 最小化实验真实运行结果（run mini3-v1）
 docs/results-minimal-128.md    # 升级档运行结果（run mini128-v1，2,048 音频）
