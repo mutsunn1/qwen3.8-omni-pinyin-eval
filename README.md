@@ -28,6 +28,7 @@
 > 声学基线：SDHY P0-v2（wav2vec2-XLSR + M1/X2 头）已下载并评测，
 > 见 [docs/baseline-sdhy.md](docs/baseline-sdhy.md)（2,048 音频：initial 0.60 /
 > final 0.75 / tone 0.70 / joint 0.30；Qwen 对应 0.96 / 0.94 / 0.91 / 0.83）。
+> Obsidian study/ 文档镜像：[study/](study/README.md)（完整设计/最小化设计/最简报告/ISE 详情/三模型弱项）
 > 一页汇总：[**最简实验报告**](docs/report-minimal.md) · 详细版：[最小化实验报告](docs/minimal-experiment-report.md)
 > · 三模型弱项对比：[model-weakness-comparison.md](docs/model-weakness-comparison.md)；
 > 分档摘要：[mini3-v1](docs/results-minimal-v1.md)、[mini128-v1](docs/results-minimal-128.md)。
@@ -240,6 +241,7 @@ exp5 `{"final"}`、exp6 `{"tone"}`）。**v3 已取消 A/B 任务。** 主指标
 configs/base.yaml              # 完整设计配置（数据/模型/任务/统计/计费）
 configs/minimal.yaml           # ¥70 最小化设计配置（继承 base）
 docs/experiment-design-minimal.md  # 最小化实验设计（v3, ¥70 预算）
+study/                         # Obsidian study/ 笔记的 GitHub 镜像（5 篇，脚本同步）
 docs/report-minimal.md         # 最简实验报告（一页/lite 版）
 docs/minimal-experiment-report.md  # 两档最小化实验汇总报告（详细）
 docs/baseline-sdhy.md          # SDHY P0-v2 声学基线（下载/适配/评测结果）
