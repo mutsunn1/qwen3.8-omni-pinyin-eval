@@ -10,6 +10,7 @@
 | [Qwen 3.8 omni 最简实验报告.md](Qwen%203.8%20omni%20%E6%9C%80%E7%AE%80%E5%AE%9E%E9%AA%8C%E6%8A%A5%E5%91%8A.md) | 一页结论：主结果、消融、双外部基线、成本（2026-10-30） | [`docs/report-minimal.md`](../docs/report-minimal.md) |
 | [Qwen 3.8 omni 讯飞 ISE 基线详情.md](Qwen%203.8%20omni%20%E8%AE%AF%E9%A3%9E%20ISE%20%E5%9F%BA%E7%BA%BF%E8%AF%A6%E6%83%85.md) | 讯飞 ISE 详细基线：鉴权/协议/适配/交互账目/全量结果/性价比 | [`docs/baseline-ise-detail.md`](../docs/baseline-ise-detail.md) |
 | [Qwen 3.8 omni 三模型弱项对比.md](Qwen%203.8%20omni%20%E4%B8%89%E6%A8%A1%E5%9E%8B%E5%BC%B1%E9%A1%B9%E5%AF%B9%E6%AF%94.md) | Qwen / SDHY / 讯飞 ISE 三模型弱项与逐对对比 | [`docs/model-weakness-comparison.md`](../docs/model-weakness-comparison.md) |
+| [Qwen 3.8 omni 三模型详细对比.md](Qwen%203.8%20omni%20%E4%B8%89%E6%A8%A1%E5%9E%8B%E8%AF%A6%E7%BB%86%E5%AF%B9%E6%AF%94.md) | Qwen / SDHY / 讯飞 ISE 详细对比（能力/精度/工程/成本/选型） | [`docs/three-model-comparison.md`](../docs/three-model-comparison.md) |
 
 同步方式：`python scripts/sync_study_docs.py --vault-dir <Obsidian study/ 目录>`。
 脚本只做复制与链接改写（Obsidian `[[wiki]]` → Markdown 相对链接），不改正文。

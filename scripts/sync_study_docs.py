@@ -50,6 +50,10 @@ DOCS: dict[str, tuple[str, str]] = {
         "docs/model-weakness-comparison.md",
         "Qwen / SDHY / 讯飞 ISE 三模型弱项与逐对对比",
     ),
+    "Qwen 3.8 omni 三模型详细对比.md": (
+        "docs/three-model-comparison.md",
+        "Qwen / SDHY / 讯飞 ISE 详细对比（能力/精度/工程/成本/选型）",
+    ),
 }
 
 #: short label used when rewriting a wiki link
@@ -59,12 +63,17 @@ SHORT = {
     "Qwen 3.8 omni 最简实验报告": "最简实验报告",
     "Qwen 3.8 omni 讯飞 ISE 基线详情": "讯飞 ISE 基线详情",
     "Qwen 3.8 omni 三模型弱项对比": "三模型弱项对比",
+    "Qwen 3.8 omni 三模型详细对比": "三模型详细对比",
 }
 
 #: relative links inside the vault notes that must point back into docs/
 LINK_FIXES = {
     "(experiment-design.md)": "(Qwen%203.8%20omni%20音素识别实验设计.md)",
     "(baseline-ise.md)": "(../docs/baseline-ise.md)",
+    "(model-weakness-comparison.md)": "(Qwen%203.8%20omni%20%E4%B8%89%E6%A8%A1%E5%9E%8B%E5%BC%B1%E9%A1%B9%E5%AF%B9%E6%AF%94.md)",
+    "(report-minimal.md)": "(Qwen%203.8%20omni%20%E6%9C%80%E7%AE%80%E5%AE%9E%E9%AA%8C%E6%8A%A5%E5%91%8A.md)",
+    "(baseline-sdhy.md)": "(../docs/baseline-sdhy.md)",
+    "(baseline-ise-detail.md)": "(../docs/baseline-ise-detail.md)",
 }
 
 

@@ -1,7 +1,7 @@
 # 三个模型的弱项评测对比（Qwen3.8-Omni / SDHY P0-v2 / 讯飞 ISE）
 
 > 日期：2026-10-30 · 同一批 **2,048 条** prosodic-abx 单音节音频（128 target × 4 voice × 4 tone）
-> 相关文档：[最小化实验报告](report-minimal.md) · [SDHY 基线](baseline-sdhy.md) ·
+> 相关文档：[三模型详细对比](three-model-comparison.md) · [最小化实验报告](report-minimal.md) · [SDHY 基线](baseline-sdhy.md) ·
 > [讯飞 ISE 基线](baseline-ise-detail.md) · 数据：`results/three-model-weakness.json`
 
 ## 0. 结论先行
