@@ -51,6 +51,12 @@ class ChatRequest:
     thinking: bool
     system_prompt: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+    #: per-request output cap; ``None`` keeps the configured default (the
+    #: sentence tasks need C1=256 / C2=1024 from the design).
+    max_tokens: int | None = None
+    #: optional output-schema hint; the sentence experiment wraps A's syllable
+    #: array in a JSON object, so the payload only needs ``json`` mode here.
+    output_schema: str | None = None
 
 
 @dataclass(slots=True)
@@ -274,7 +280,7 @@ class DashScopeClient(BaseClient):
             "modalities": self.modalities,
             "temperature": self.temperature,
             "top_p": self.top_p,
-            "max_tokens": self.max_output_tokens,
+            "max_tokens": request.max_tokens or self.max_output_tokens,
             "stream": self.stream,
         }
         if self.stream:

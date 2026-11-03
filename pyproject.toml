@@ -8,7 +8,9 @@ dependencies = [
     "huggingface_hub>=0.34",
     "numpy>=2.1",
     "openai>=1.52",
+    "opencc-python-reimplemented>=0.1.7",
     "pandas>=2.2",
+    "pypinyin>=0.51",
     "pyarrow>=18.0",
     "pyyaml>=6.0",
     "soundfile>=0.12",
@@ -19,6 +21,14 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "ruff>=0.8",
+]
+
+#: Optional local ASR stack for task D (design v0.2 附录 A): ``uv sync --extra asr``.
+[project.optional-dependencies]
+asr = [
+    "funasr>=1.2",
+    "torch>=2.2",
+    "torchaudio>=2.2",
 ]
 
 [project.scripts]

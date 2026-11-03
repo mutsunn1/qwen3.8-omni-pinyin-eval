@@ -760,6 +760,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # sentence-level pilot lives in its own subpackage + config
+    argv_list = list(argv) if argv is not None else sys.argv[1:]
+    if argv_list and argv_list[0] == "sentence":
+        from .sentence.cli import main as sentence_main
+
+        return sentence_main(argv_list[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

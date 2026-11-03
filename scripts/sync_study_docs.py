@@ -54,6 +54,14 @@ DOCS: dict[str, tuple[str, str]] = {
         "docs/three-model-comparison.md",
         "Qwen / SDHY / 讯飞 ISE 详细对比（能力/精度/工程/成本/选型）",
     ),
+    "Qwen 3.8 omni 整句拼音评测实验设计.md": (
+        "docs/sentence-experiment-design.md",
+        "整句 pilot 设计 v0.1（A 整句转写 / B 发音评测 / C 朗读评分）",
+    ),
+    "Qwen 3.8 omni 整句拼音评测实验报告.md": (
+        "docs/sentence-experiment-report.md",
+        "整句 pilot 结果（run sentence-v1，7,796 次调用 / ¥8.29，验收通过）",
+    ),
 }
 
 #: short label used when rewriting a wiki link
@@ -64,6 +72,8 @@ SHORT = {
     "Qwen 3.8 omni 讯飞 ISE 基线详情": "讯飞 ISE 基线详情",
     "Qwen 3.8 omni 三模型弱项对比": "三模型弱项对比",
     "Qwen 3.8 omni 三模型详细对比": "三模型详细对比",
+    "Qwen 3.8 omni 整句拼音评测实验设计": "整句评测实验设计",
+    "Qwen 3.8 omni 整句拼音评测实验报告": "整句评测实验报告",
 }
 
 #: relative links inside the vault notes that must point back into docs/
@@ -74,6 +84,8 @@ LINK_FIXES = {
     "(report-minimal.md)": "(Qwen%203.8%20omni%20%E6%9C%80%E7%AE%80%E5%AE%9E%E9%AA%8C%E6%8A%A5%E5%91%8A.md)",
     "(baseline-sdhy.md)": "(../docs/baseline-sdhy.md)",
     "(baseline-ise-detail.md)": "(../docs/baseline-ise-detail.md)",
+    "(sentence-experiment-design.md)": "(Qwen%203.8%20omni%20%E6%95%B4%E5%8F%A5%E6%8B%BC%E9%9F%B3%E8%AF%84%E6%B5%8B%E5%AE%9E%E9%AA%8C%E8%AE%BE%E8%AE%A1.md)",
+    "(sentence-experiment-report.md)": "(Qwen%203.8%20omni%20%E6%95%B4%E5%8F%A5%E6%8B%BC%E9%9F%B3%E8%AF%84%E6%B5%8B%E5%AE%9E%E9%AA%8C%E6%8A%A5%E5%91%8A.md)",
 }
 
 

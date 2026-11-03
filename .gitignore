@@ -4,10 +4,12 @@ data/audio/
 data/noisy/
 data/manifests/
 data/ise/
+data/sentence/
 # results (regenerable)
 results/
 # python
 .venv/
+.uv-cache/
 __pycache__/
 *.pyc
 .pytest_cache/

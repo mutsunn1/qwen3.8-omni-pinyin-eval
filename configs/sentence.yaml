@@ -1,0 +1,93 @@
+# ---------------------------------------------------------------------------
+# Sentence-level pilot config (design: docs/sentence-experiment-design.md v0.1)
+#
+# Three tasks on two corpora:
+#   A = whole-utterance pinyin transcription (AISHELL-3, audio only)
+#   B = whole-utterance pronunciation evaluation (OMPAL, audio + text)
+#   C = whole-utterance reading scoring (OMPAL, audio + text)
+# Conditions: C1 = think off / clean / JSON; C2 = think on / clean / JSON.
+#
+# Usage:
+#   .venv/bin/python -m pinyin_eval.cli sentence check
+#   .venv/bin/python -m pinyin_eval.cli sentence estimate --tasks A,B,C
+#   .venv/bin/python -m pinyin_eval.cli sentence generate --run-id sentence-v1
+# ---------------------------------------------------------------------------
+extends: configs/base.yaml
+
+project:
+  name: qwen38-omni-sentence-pilot
+  seed: 20261101
+  operator: ""
+
+sentence:
+  seed: 20261101
+  paths:
+    data_dir: data/sentence
+    manifest_dir: data/sentence/manifests
+    results_dir: results/sentence
+  tasks: [A, B, C]
+  # design §5 fixed generation conditions.
+  # max_tokens_by_task: pilot-calibrated output caps (see docs/sentence-experiment-report.md).
+  # Task A emits one JSON object per character (~30-40 tokens/char), so the design's
+  # flat 256 truncates 25% of A responses and 17% of B responses (pilot-design-v1);
+  # task C's three numbers fit in 256. The caps only bound output length; billing
+  # always uses the real usage tokens returned by the API.
+  conditions:
+    C1:
+      thinking: false
+      max_tokens: 256
+      max_tokens_by_task: {A: 1536, B: 768, D: 768}
+    C2:
+      thinking: true
+      max_tokens: 1024
+      max_tokens_by_task: {A: 1536, B: 1280, D: 768}
+  concurrency: 48
+  qps: null
+  # design §10.1 hard budget (CNY); runner stops scheduling new calls at the cap
+  budget_cny: 20
+  estimate:
+    # expected output tokens used by `sentence estimate` (real usage is recorded)
+    assumed_output_tokens:
+      A: 320
+      B: 320
+      C: 30
+      C2: 800
+  stats:
+    n_boot: 2000
+    alpha: 0.05
+    seed: 20261101
+  acceptance:
+    parse_success_min: 0.95
+    alignment_coverage_min: 0.95
+    max_cost_cny: 20.0
+  # Task D (design v0.2 附录 A): ASR-text-conditioned alignment & scoring.
+  # C1 only; three frozen text sources; own ¥10 acceptance budget (design §A.8).
+  d:
+    seed: 20261103
+    sources: [D-gold, D-asr, D-inject-10]
+    inject_ratio: 0.10
+    inject_mix: {sub: 0.6, del: 0.2, ins: 0.2}
+    conditions: [C1]
+    budget_cny: 10
+    asr_outputs: data/sentence/d_asr/asr_outputs.jsonl
+    asr_summary: data/sentence/d_asr/d_asr_summary.json
+  datasets:
+    aishell3:
+      source: "OpenSLR SLR93 (Apache-2.0); HF mirror AISHELL/AISHELL-3"
+      split: train
+      seed: 20261101
+      n_speakers: 30
+      n_per_speaker: 10
+      n_items: 300
+      min_chars: 5
+      max_chars: 30
+      strata:
+        gender: {female: 18, male: 12}
+        accent: {north: 22, south: 8}
+        age: {B: 24, C: 5, D: 1}
+      special_subset_min: 50
+      sample_rate_hz: 44100
+    ompal:
+      source: "github.com/phantomhsieh/OMPAL-corpus (CC BY 4.0)"
+      n_learner_target: 1754
+      n_native_anchor: 82

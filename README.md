@@ -20,14 +20,17 @@ zero-shot 评测框架，回答四个问题：
 ## 0. 当前状态与成果速览
 
 框架已完整实现 v3 设计并通过真实 API 验证；完成两档最小化实验、两个外部基线
-（SDHY P0-v2、讯飞 ISE）以及三模型对比。
+（SDHY P0-v2、讯飞 ISE）以及三模型对比；并完成**整句（utterance）pilot**：
+任务 A 整句拼音转写（AISHELL-3）、B 整句发音评测 / C 整句朗读评分（OMPAL），
+C1/C2 两个思考条件全量真实运行（run `sentence-v1`）。
 
 | 运行 | 数据 | 条件 | 调用 | 实际成本 | 关键结果 |
 |---|---|---:|---:|---:|---|
 | `mini3-v1`（96 档） | 1,536 音频 | 4 | 59,968 | ¥12.37 | initial 0.952 / final 0.938 / tone 0.910 / joint 0.816；派生检测 F1 0.912 / FPR 0.184 |
 | **`mini128-v1`（128 档，主结果）** | **2,048 音频** | 4 | 79,680 | **¥16.78** | **initial 0.962 / final 0.949 / tone 0.912 / joint 0.838**；派生检测 **F1 0.922 / FPR 0.162** |
 | 检测 prompt 探针 | 512 音频 × 6 任务 × 3 变体 | 3 | 9,216 | ¥1.45 | 改 prompt 无法修复过度判不一致（FPR 0.76→0.77） |
-| 合计（Qwen） | — | — | **148,864** | **¥30.60 / ¥70（43.7%）** | 预算守卫未触发 |
+| **`sentence-v1`（整句 pilot）** | AISHELL-3 300 句 + OMPAL 1,758 条（+82 native 锚点） | 2（C1/C2） | **7,796** | **¥8.29** | A joint **0.883**（C2 0.917）、句级完全正确 0.323（C2 0.440）；B macro-F1 0.553/0.558/0.601；C Pearson 0.352/0.581/0.393；解析 99.99%，验收通过 |
+| 合计（Qwen） | — | — | **156,660** | **¥38.89 / ¥70（55.6%）** | 预算守卫未触发 |
 
 **核心结论**
 
@@ -37,6 +40,11 @@ zero-shot 评测框架，回答四个问题：
 3. **噪声主要伤声母/联合**：−12 ~ −13.5pp；声调鲁棒。自由文本仅对“只输出韵母”的
    exp5 有害（ü 丢失，−7 ~ −25pp），JSON 应作为主格式。
 4. 主条件下模型能力：声母 **0.962**、韵母 **0.949**、声调 **0.912**、联合 **0.838**。
+5. **整句 pilot**（`sentence-v1`，¥8.29）：整句拼音转写可用（joint 0.883 / C2 0.917，
+   按单音节类别加权后与单音节基本持平、声调略好）；**发音错误定位不可用**
+   （B macro-F1 0.55–0.60、声调 FNR 0.79，模型偏向“都读对”）；朗读评分只能算中等相关
+   （C Pearson 0.35 / 0.58 / 0.39）。**thinking on 在整句上反转**：A/B 显著更好、C 的
+   MAE 更差——单音节“thinking 有害”的结论不能外推到整句。
 
 **外部基线（同一批 2,048 音频）**
 
@@ -61,7 +69,10 @@ zero-shot 评测框架，回答四个问题：
 * 分档摘要：[mini3-v1](docs/results-minimal-v1.md) · [mini128-v1](docs/results-minimal-128.md)
 * 设计：[完整设计 v3](docs/experiment-design.md) ·
   [¥70 最小化设计](docs/experiment-design-minimal.md)
-* Obsidian 笔记镜像（6 篇）：[study/README.md](study/README.md)
+* 整句 pilot：[实验报告](docs/sentence-experiment-report.md) ·
+  [设计 v0.1](docs/sentence-experiment-design.md) ·
+  自动报告 `results/sentence/sentence-v1/report.md` · 独立审计 `.../verification.md`
+* Obsidian 笔记镜像（7 篇）：[study/README.md](study/README.md)
 
 ---
 
@@ -173,6 +184,27 @@ set -a && . ./.env && set +a
 
 > 详细接口/鉴权/适配/交互账目/性价比：[docs/baseline-ise-detail.md](docs/baseline-ise-detail.md)。
 
+### 2.4 整句 pilot（sentence-v1，已完成）
+
+```bash
+# 数据准备（AISHELL-3 300 句 / 30 speakers；OMPAL 1,758 learner + 82 native 锚点）
+.venv/bin/python -m pinyin_eval.cli sentence prepare
+.venv/bin/python -m pinyin_eval.cli sentence check
+.venv/bin/python -m pinyin_eval.cli sentence estimate          # expected ¥5.5 / worst-case ¥19.9
+# 真实运行（7,796 次调用；断点续跑 + ¥20 硬预算；实测 ¥8.29 / 112 min）
+.venv/bin/python -m pinyin_eval.cli sentence generate --run-id sentence-v1
+.venv/bin/python -m pinyin_eval.cli sentence score   --run-id sentence-v1
+.venv/bin/python -m pinyin_eval.cli sentence cost    --run-id sentence-v1
+.venv/bin/python -m pinyin_eval.cli sentence report  --run-id sentence-v1
+```
+
+* 3 个任务 × 2 条件（C1 think off / C2 think on），AISHELL-3 300 句（30 speakers，
+  性别/口音/年龄组精确分层）+ OMPAL 1,758 learner（46 learners）；prompt 版本
+  `sentence-v1`，输出上限按任务校准（A 1536 / B 768–1280 / C 256–1024 tokens）。
+* 验收：解析成功率 A 100% / B 100% / C 99.97%，对齐覆盖率 ≥99.8%，成本 ¥8.29 ≤ ¥20，
+  **全部通过**；结果与解释边界见 [整句 pilot 报告](docs/sentence-experiment-report.md)。
+* 离线全链路（无 key）：`make sentence-mock`（7,796 次 mock 调用 → 评分 → 报告）。
+
 ## 3. 实验与数据流
 
 ```
@@ -262,6 +294,7 @@ data/raw/*.parquet ──prepare-data──> data/audio/**/*.wav + data/manifest
 configs/base.yaml                  # 完整设计配置（数据/模型/任务/统计/计费）
 configs/minimal.yaml               # ¥70 最小化设计（96 档）
 configs/minimal-128.yaml           # 128 档升级配置（递归 extends 示例）
+configs/sentence.yaml              # 整句 pilot（A/B/C × C1/C2，¥20 预算）
 docs/experiment-design.md          # 完整设计 v3（冻结快照）
 docs/experiment-design-minimal.md  # 最小化设计（¥70）
 docs/report-minimal.md             # 一页最简实验报告
@@ -273,6 +306,8 @@ docs/baseline-ise.md               # 讯飞 ISE 基线（简版）
 docs/baseline-ise-detail.md        # 讯飞 ISE 详细（接口/协议/账目/性价比）
 docs/model-weakness-comparison.md  # 三模型弱项对比
 docs/three-model-comparison.md     # 三模型详细对比
+docs/sentence-experiment-design.md # 整句 pilot 设计 v0.1（冻结快照）
+docs/sentence-experiment-report.md # 整句 pilot 报告（结果/偏差/解释边界）
 docs/contracts.md / decisions.md / runbook.md / schemas.md
 study/                             # Obsidian study/ 笔记镜像（6 篇，脚本同步）
 scripts/
@@ -283,12 +318,15 @@ scripts/
   analyze_detection_probe.py       # 检测 prompt 偏置分析
   make_detection_probe_subset.py   # 检测探针固定子集
   sync_study_docs.py               # Obsidian → study/ 同步
+  prepare_sentence_data.py         # 整句数据准备（AISHELL-3 抽样 + OMPAL 清洗 + 音频）
 src/pinyin_eval/
   config.py normalize.py records.py prompts.py parsing.py client.py runner.py
   scoring.py pricing.py derived_detection.py cli.py
   data/dataset.py data/minimal_pairs.py
   metrics.py stats.py report.py tasks.py
-tests/                             # 282 个离线测试（无网络 / 无 key）
+  sentence/                        # 整句 pilot：normalize/parsing/scoring/metrics/
+                                   # runner/report/cli/mock/prompts/records
+tests/                             # 离线测试（无网络 / 无 key；含 sentence 5 个测试文件）
 ```
 
 ## 6. 模型调用与成本控制
@@ -349,6 +387,12 @@ GitHub Actions 每次 push 执行 `uv sync --locked → ruff → pytest`（无�
   18.8–150 倍（按任务），仅建议做小样本交叉验证；余额 4,157。
 * **SDHY 基线**：CPU fp32 与官方标定 cuda-fp16 不等价；自由识别是适配口径，
   不能直接代表其产品能力。
+* **整句 pilot 的解释边界**（`sentence-v1`）：A 抽样来自 AISHELL-3 train 划分
+  （可访问镜像无 test 拼音标注），特殊子集仅 6 条儿化；OMPAL 只有 3 位评分者、
+  法语 L1 子集，B/C 结论只限定该 learner 集合；A/B/C 语料与 ground truth 不同、
+  **不能横向比较**；B 任务当前形态不可做自动纠音（macro-F1 0.55–0.60、FNR 0.79），
+  需要任务重设计；C 的相关只有中等（0.35–0.58）且整体偏低约 0.45 分（native 锚点）。
+  完整偏差清单见 [整句 pilot 报告 §2](docs/sentence-experiment-report.md)。
 * 数据子集抽样导致的解释边界、逐对 CI（±7–14pp）见各结果文档。
 
 ## 10. 引用与许可
@@ -361,3 +405,7 @@ GitHub Actions 每次 push 执行 `uv sync --locked → ruff → pytest`（无�
 * 模型：阿里云百炼 Qwen3.8-Omni-Flash，遵循[百炼服务条款](https://help.aliyun.com/zh/model-studio/)。
 * 外部基线：SDHY P0-v2（`CHAO-AI-Lab/SDHY_Test_System`，私有）、讯飞语音评测
   （讯飞开放平台，遵循其服务条款；密钥不入库）。
+* 整句 pilot 数据：[AISHELL-3](https://www.openslr.org/93/)（Apache-2.0；
+  wav 经 `shenyunhang/AISHELL-3` HF 完整镜像获取）、
+  [OMPAL](https://github.com/phantomhsieh/OMPAL-corpus)（CC BY 4.0；
+  commit `c3aaa9e8…`）；派生清单与音频仅本地使用，再分发请保留署名与许可。
