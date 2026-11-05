@@ -308,8 +308,9 @@ gold 字；分维 tone 0.681 / consonant 0.301 / vowel 0.323），逐 learner CE
 | D-asr | 0.9377 | 0.9833 | **0.9599** | [0.9496, 0.9698] | 99.45% | 99.72% |
 | D-inject-10 | 0.9958 | 0.9544 | **0.9747** | [0.9726, 0.9769] | 99.86% | 97.95% |
 
-- 相对 oracle 的退化（Δ = D-gold − 条件；负值表示该条件更差）：D-asr **F1 −2.9pp**
-  [−3.9, −2.0pp]、D-inject −1.4pp；逐 utterance 对齐完全正确的 McNemar：
+- 相对 oracle 的退化（Δ = D-gold − 条件；**正值 = 该条件更差**）：D-asr **F1 −2.9pp**
+  （即条件比 gold 低 2.9pp，对应 Δ = +2.9pp [+2.0, +3.9pp]）、D-inject 低 1.4pp
+  （Δ = +1.4pp）；逐 utterance 对齐完全正确的 McNemar：
   D-asr 仅 gold 正确 354 条 vs 仅 asr 正确 96 条（p<0.001），D-inject 499 vs 94（p<0.001）。
 - 结论（RQ-D1 前半）：**模型能较好地把给定文本对齐到音频**；真实 ASR 文本下
   precision 降到 0.94（模型倾向于把 ASR 多出的字也判为“对齐”），但 recall 反而略升。
@@ -324,8 +325,9 @@ gold 字；分维 tone 0.681 / consonant 0.301 / vowel 0.323），逐 learner CE
 
 - 关键发现（RQ-D1 后半）：**模型对“受控随机错字”识别良好（recall 0.74），但对真实 ASR 错字
   几乎不报（recall 0.17）**——precision 都约 0.77–0.80，说明模型一旦报错基本报对，
-  但在 ASR 文本下倾向于“信任输入文本”。真实 ASR 的错字以插入（语气词/重复）为主，
-  模型很可能把它们当作发音内容而非文本错误。
+  但在 ASR 文本下倾向于“信任输入文本”。真实 ASR 的文本错误**同时包含替换与插入**
+  （S/D/I = 2,361/55/1,509；替换 12.05%、插入 7.70% of gold chars，插入多为语气词/重复），
+  模型对其中相当一部分（尤其是插入）会当作发音内容而非文本错误。
 - D-gold 的 precision 0 表示模型在 oracle 文本上仍会假报少量 text_error（假阳性）。
 
 ### 6.4 发音错误定位（仅 text-correct + aligned 字；正类 = OMPAL 错误）
@@ -351,7 +353,7 @@ gold 字；分维 tone 0.681 / consonant 0.301 / vowel 0.323），逐 learner CE
 | D-asr | **0.4830** | [0.3963, 0.5530] | 0.4614 | 0.4892 | 0.6204 |
 | D-inject-10 | **0.4309** | [0.3468, 0.5036] | 0.4132 | 0.5520 | 0.6903 |
 
-分维（accuracy / fluency / prosody）：gold r 0.331 / 0.534 / 0.391；asr 0.393 / 0.512 / 0.411；
+分维（accuracy / fluency / prosody）：gold r 0.331 / 0.534 / 0.391；asr 0.392 / 0.512 / 0.410；
 inject 0.291 / 0.517 / 0.351。与任务 C 同量级（C C1 三维 r 0.352/0.581/0.393）。
 
 - **RQ-D3 答案**：真实 ASR 文本 **没有**显著降低评分相关性（Δ mean r = −0.020
@@ -360,12 +362,12 @@ inject 0.291 / 0.517 / 0.351。与任务 C 同量级（C C1 三维 r 0.352/0.581
 
 ### 6.6 综合：RQ-D4（真实 ASR vs 受控错误文本的退化方式）
 
-| 维度 | 真实 ASR（D-asr） | 受控注入（D-inject-10） |
+| 维度（条件相对 D-gold） | 真实 ASR（D-asr） | 受控注入（D-inject-10） |
 |---|---|---|
-| 逐字对齐 F1 | −2.9pp（显著） | −1.4pp（显著） |
+| 逐字对齐 F1 | **低 2.9pp**（显著） | **低 1.4pp**（显著） |
 | text_error 检测 | recall 0.17（几乎不报） | recall 0.74（能报） |
 | 发音定位 macro-F1 | 无显著变化 | 无显著变化 |
-| 整句评分 mean r | 无显著变化 | −3.2pp（显著） |
+| 整句评分 mean r | 无显著变化 | **低 3.2pp**（显著） |
 
 两种“错误文本”造成的退化**模式不同**：真实 ASR 文本主要伤害逐字对齐、
 且模型不把它当作文本错误，但不影响评分；受控随机错字能被模型识别为文本错误，
@@ -373,11 +375,14 @@ inject 0.291 / 0.517 / 0.351。与任务 C 同量级（C C1 三维 r 0.352/0.581
 
 ### 6.7 成本与验收（设计 A.8）
 
-- 5,274 次调用（另含重试记录 8 条），实际 **¥6.31**（D 预算上限 ¥10），
+- 5,274 次计划调用；`generations.jsonl` 共 5,282 条记录 = 5,274 个 item + 8 条被续跑
+  取代的旧错误记录（16 条记录带 error 字段）；最终 **8 条 item 为 API 错误**
+  （APIConnectionError/Timeout，重试 6 次耗尽，非“空回复”），按解析失败单列、
+  不进指标分母。实际 **¥6.31**（D 预算上限 ¥10），
   A/B/C ¥8.29 + D ¥6.31 = **¥14.60 / ¥20**。
 - 验收：解析成功率 D-gold 99.89% / D-asr 99.83% / D-inject 99.83%（≥95%）、
   输入字覆盖率 99.96% / 99.45% / 99.86%（≥95%）、ASR 文本 100% 归档（sha256 记录）、
-  成本 ≤¥10 → **全部通过**。8 条空回复按解析失败单列，不进指标分母。
+  成本 ≤¥10 → **全部通过**。
 
 ## 7. 结论与解释边界
 
@@ -443,8 +448,10 @@ C2 建议固定 reasoning token 预算后复测；AISHELL-3 test 划分的拼音
 离线全链路（无 API key）：`make sentence-mock`（7,796 次 mock 调用 + 评分 + 报告）；
 任务 D 的离线链路见 `tests/test_sentence_d_task.py`（mock E2E）。
 
-代码版本：整句实现提交为 `<待回填>`（实验运行时仓库 HEAD 为 `9ad0850`，不含 sentence 代码；
-复现请 checkout 实现提交并 `uv sync --locked`）。
+代码版本：A/B/C 运行 `sentence-v1` 的 manifest 记录的是实验开始时的仓库 HEAD
+`9ad0850`（不含 sentence 实现）；整句实现提交为 **`3068e95`**（A/B/C + D 代码）、
+任务 D 结果提交为 **`31880fd`**（文档更新提交 `59b5767`）。复现请 checkout `31880fd`
+（或更新的 HEAD）并 `uv sync --locked`；D 的 `run_manifest.json` 记录的是 `3068e95`。
 
 ## 9. 产物清单
 
@@ -456,7 +463,8 @@ C2 建议固定 reasoning token 预算后复测；AISHELL-3 test 划分的拼音
 | 指标与报告 | `results/sentence/sentence-v1/{report.md,metrics.csv,comparisons.csv,report_summary.json,acceptance.json}`、`figures/*.svg` |
 | 逐 speaker/learner | `per_speaker_a.csv`、`per_learner_b.csv`、`per_learner_c.csv` |
 | 单音节对照明细 | `single_syllable_categories.csv` |
-| 独立审计 | `results/sentence/sentence-v1/verification.md` |
+| 独立审计（A/B/C） | `results/sentence/sentence-v1/verification.md` |
+| 独立审计（任务 D） | `results/sentence/sentence-d-v1/verification.md` |
 | 任务 D 运行 | `results/sentence/sentence-d-v1/{run_manifest.json,generations.jsonl,usage.csv,cost_summary.json,d_prep_summary.json}` |
 | 任务 D 评分/报告 | `results/sentence/sentence-d-v1/{rows_d.parquet,d_metrics.csv,d_comparisons.csv,d_per_learner.csv,d_acceptance.json,d_report_summary.json,d_report.md}` |
 | 任务 D 数据 | `data/sentence/manifests/{d_items.jsonl,d_injected_10.jsonl,d_prep_summary.json}`、`data/sentence/d_asr/{asr_outputs.jsonl,d_asr_summary.json,README.md}` |

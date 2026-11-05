@@ -576,12 +576,24 @@ def cmd_d_score(args: argparse.Namespace) -> int:
     for item in items:
         key = f"D|C1|{item.item_id}"
         generation = generations.get(key)
-        if generation is None:
+        missing_generation = generation is None
+        if missing_generation:
             parsed = {"parse_status": "api_error", "detail": "missing generation"}
             parsed["alignment"] = []
             parsed["scores"] = {}
             raw = ""
             finish_reason = None
+        elif generation.get("error"):
+            # a final failed API call (retries exhausted) is an api_error, not an
+            # empty reply — keep it out of the "empty response" bucket
+            parsed = {
+                "parse_status": "api_error",
+                "detail": str(generation.get("error"))[:300],
+                "alignment": [],
+                "scores": {},
+            }
+            raw = generation.get("response_text") or ""
+            finish_reason = generation.get("finish_reason")
         else:
             parsed = d_task.parse_task_d(generation.get("response_text") or "")
             raw = generation.get("response_text") or ""
@@ -593,6 +605,7 @@ def cmd_d_score(args: argparse.Namespace) -> int:
                 "item_id": item.item_id,
                 "source": item.meta.get("text_source"),
                 "parse_status": status,
+                "missing_generation": missing_generation,
                 "detail": parsed.get("detail", "")[:300],
                 "finish_reason": finish_reason,
                 "raw": raw[:500],
@@ -616,8 +629,9 @@ def cmd_d_score(args: argparse.Namespace) -> int:
         "generations": len(generations),
         "n_items": len(items),
         "status_counts": dict(status_counts),
-        "n_parse_failures": sum(1 for f in failures if f["parse_status"] != "api_error"),
-        "n_missing_generations": sum(1 for f in failures if f["parse_status"] == "api_error"),
+        "n_parse_failures": sum(1 for f in failures if f["parse_status"] not in ("api_error",)),
+        "n_api_errors": sum(1 for f in failures if f["parse_status"] == "api_error"),
+        "n_missing_generations": sum(1 for f in failures if f.get("missing_generation")),
         "rows": len(rows),
     }
     (run_dir / "d_score_summary.json").write_text(

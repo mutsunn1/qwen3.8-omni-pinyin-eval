@@ -594,6 +594,7 @@ def build_d_items(
         },
         "asr": {
             "model_id": asr_summary.get("model_id"),
+            "funasr_version": asr_summary.get("funasr_version"),
             "device": asr_summary.get("device"),
             "n_ok": asr_summary.get("n_ok"),
             "n_expected": len(b_rows),
@@ -1478,7 +1479,9 @@ def render_d_markdown(payload: Mapping[str, Any]) -> str:
         ("prompt_version", f"`{manifest.get('prompt_version') or D_PROMPT_VERSION}`"),
         ("ASR 模型", f"`{(payload.get('asr') or {}).get('model_id')}`"),
         ("ASR device / 版本", f"{(payload.get('asr') or {}).get('device')} / `{(payload.get('asr') or {}).get('funasr_version')}`"),
-        ("计划调用数", _fmt((payload.get('cost') or {}).get('totals', {}).get('n_calls'))),
+        ("计划调用数", _fmt(manifest.get("n_planned"))),
+        ("已记录调用数（含重试记录）",
+         _fmt((payload.get("cost") or {}).get("totals", {}).get("n_calls"))),
         ("实际成本", f"¥{_fmt((payload.get('cost') or {}).get('totals', {}).get('cost_cny'))}"),
         ("预算上限", f"¥{_fmt(manifest.get('budget_cny'))}"),
         ("验收总结果", "通过" if (payload.get("acceptance") or {}).get("passed") else "未通过"),

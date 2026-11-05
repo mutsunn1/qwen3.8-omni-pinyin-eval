@@ -890,7 +890,8 @@ def test_reproducibility_provenance(tmp_path: Path) -> None:
         "d_provenance: ASR model/version/decode recorded",
         "d_provenance: injection seed/ratio/mix recorded",
         "run seed == sentence.d.seed (20261103)",
-        "git_commit == current HEAD",
+        "run_manifest git_commit resolvable",
+        "run_manifest git_commit is ancestor of HEAD (post-run commits allowed)",
     ):
         assert checks.get(item) is not None, item
         assert checks[item]["ok"] is True, (item, checks[item])

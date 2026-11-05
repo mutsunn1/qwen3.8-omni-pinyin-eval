@@ -89,6 +89,13 @@ _TONE_TABLE = {
 }
 _TRUE_STRINGS = {"true", "1", "yes", "是", "正确", "对", "ok", "good", "correct"}
 _FALSE_STRINGS = {"false", "0", "no", "否", "错误", "不对", "bad", "wrong", "incorrect"}
+#: parser tolerance policy (multi-label answers resolve by fixed priority)
+_NO_ERROR_VALUES = {"", "null", "nil", "ok", "correct", "无", "没有", "无错误", "正确"}
+_ERROR_TYPE_ALIASES_ORDERED = (
+    ("tone", "tone"), ("声调", "tone"),
+    ("consonant", "consonant"), ("声母", "consonant"), ("initial", "consonant"),
+    ("vowel", "vowel"), ("韵母", "vowel"), ("final", "vowel"),
+)
 _ERROR_TYPE_ALIASES = {
     "none": "none", "无": "none", "ok": "none", "correct": "none",
     "tone": "tone", "声调": "tone", "调": "tone",
@@ -486,21 +493,27 @@ def as_score(value: Any) -> float | None:
 
 
 def normalize_error_type(value: Any) -> str | None:
-    """Parse the design's ``error_type`` vocabulary (English *or* Chinese).
+    """Parse the design A.3 ``error_type`` vocabulary (English or Chinese).
 
-    NOTE: this is deliberately the design-correct parse: the pipeline bug found
-    in phase A (English values collapsed to ``none``) shows up as a metric
-    discrepancy instead of being replicated here.
+    Tolerance mirrors the frozen task-D parser policy: a reply may contain
+    multi-label strings such as ``initial+final+tone``; those are resolved with
+    the same fixed token priority as the pipeline (tone > consonant > vowel) so
+    that independent and reported localization metrics are comparable.
     """
     if value is None:
         return None
     raw = str(value).strip().lower()
-    if raw in ("", "null", "none", "无"):
+    if raw in _NO_ERROR_VALUES:
         return "none"
     if raw in _ERROR_TYPE_ALIASES:
         return _ERROR_TYPE_ALIASES[raw]
-    chinese = normalize_text(str(value))
-    return _ERROR_TYPE_ALIASES.get(chinese)
+    han = normalize_text(raw)
+    if han in _ERROR_TYPE_ALIASES:
+        return _ERROR_TYPE_ALIASES[han]
+    for token, mapped in _ERROR_TYPE_ALIASES_ORDERED:
+        if token in raw or token in han:
+            return mapped
+    return None
 
 
 def parse_d_reply(text: str) -> dict[str, Any]:
@@ -713,7 +726,7 @@ def score_d_item(
                 row["n_score_correct"] += 1
                 row["score_sum_correct"] += value
     # model entries without an input position: aligned=True claims are FP (A.3)
-    row["align_fp"] += row["n_extra_aligned"]
+    counts["align_fp"] += row["n_extra_aligned"]
     row.update(counts)
     for dimension in D_SCORE_DIMENSIONS:
         row[f"pred_{dimension}"] = (parsed.get("scores") or {}).get(dimension)
@@ -878,10 +891,16 @@ def compare_sources(
         diffs: dict[str, dict[str, Any]] = {}
         base_values = _headline_metric_values(paired_base)
         other_values = _headline_metric_values(paired_other)
+        # direction follows the frozen report: Δ = baseline (D-gold) − condition;
+        # positive = degradation for alignment/F1/Pearson, negative for MAE.
         for metric in base_values:
-            left, right = other_values.get(metric), base_values.get(metric)
+            base_value, other_value = base_values.get(metric), other_values.get(metric)
             diffs[metric] = {
-                "estimate": (left - right) if left is not None and right is not None else None
+                "estimate": (
+                    base_value - other_value
+                    if base_value is not None and other_value is not None
+                    else None
+                )
             }
         result["comparisons"][source] = {
             "n_paired": len(common),
@@ -1521,12 +1540,44 @@ def verify_reproducibility(
         ).stdout
     except (OSError, subprocess.SubprocessError):  # pragma: no cover
         head, status = None, ""
-    add_check(checks, "git_commit == current HEAD", head, run_manifest.get("git_commit"))
+    recorded_commit = run_manifest.get("git_commit")
+    commit_exists = False
+    commit_is_ancestor = False
+    if recorded_commit:
+        try:
+            commit_exists = subprocess.run(
+                ["git", "-C", str(repo_root), "cat-file", "-e", f"{recorded_commit}^{{commit}}"],
+                capture_output=True, text=True, timeout=10, check=False,
+            ).returncode == 0
+            if commit_exists and head:
+                commit_is_ancestor = subprocess.run(
+                    ["git", "-C", str(repo_root), "merge-base", "--is-ancestor",
+                     str(recorded_commit), str(head)],
+                    capture_output=True, text=True, timeout=10, check=False,
+                ).returncode == 0
+        except (OSError, subprocess.SubprocessError):  # pragma: no cover
+            pass
+    add_check(checks, "run_manifest git_commit resolvable", True, commit_exists)
+    add_check(checks, "run_manifest git_commit is ancestor of HEAD (post-run commits allowed)",
+              True, commit_is_ancestor)
     result["git"] = {
         "head": head,
+        "recorded_commit": recorded_commit,
+        "recorded_commit_exists": commit_exists,
+        "recorded_commit_is_ancestor": commit_is_ancestor,
         "dirty_files": [line for line in status.splitlines() if line.strip()][:20],
         "n_dirty": len([line for line in status.splitlines() if line.strip()]),
     }
+    if commit_exists and recorded_commit != head:
+        result.setdefault("warnings", []).append(
+            f"run_manifest records the run-start commit {str(recorded_commit)[:12]} but HEAD is "
+            f"{str(head)[:12]}: scoring/report code changed after generation started; raw "
+            "generations are preserved, and prompt fingerprints are unchanged (see checks)"
+        )
+    if status.strip():
+        result.setdefault("warnings", []).append(
+            f"working tree is dirty at verification time ({len([line for line in status.splitlines() if line.strip()])} paths)"
+        )
     planned = 3 * EXPECTED_UTTS
     add_check(checks, "n_planned == 3 × 1,758", planned, run_manifest.get("n_planned"))
     conditions = run_manifest.get("conditions") or {}
@@ -2098,7 +2149,7 @@ def compare_reported(
             for path, value in (
                 ("alignment.f1", (block.get("alignment") or {}).get("f1")),
                 ("text_error.f1", (block.get("text_error") or {}).get("f1")),
-                ("parse_success_rate", block.get("parse_success_rate")),
+                ("parse_failure_rate", block.get("parse_failure_rate")),
                 ("n_parse_ok", block.get("n_parse_ok")),
                 ("n_items", block.get("n_items")),
                 ("alignment_coverage", block.get("alignment_coverage")),
