@@ -563,6 +563,14 @@ D 主实验成本 ≤¥10；不设准确率硬阈值。
 
 ### A.9 未决问题（D）
 
+> 运行后回答（run `sentence-d-v1`，2026-11-05）：
+> 1. ASR 用 FunASR Paraformer-zh（CPU；MPS 在该 FunASR/torch 组合下不可用，已记录 fallback）；
+> 2. 主错误率 10% 已跑，5%/20% 未跑（与设计一致，仅敏感性）；
+> 3. 逐字 `score` 保留，仅作描述统计（无人工 gold）；
+> 4. C2 未纳入 D（主表只做 C1）；
+> 5. ASR 质量 pilot：CER(micro) 0.200、S/D/I 2361/55/1509、normalization rate 0.665。
+
+
 1. 实际可用的 ASR 是 Paraformer-zh 还是 Whisper large-v3？需固定版本与解码。
 2. D-inject 主错误率用 10% 是否合适？5/20 是否值得跑。
 3. 逐字 `score` 是否保留？OMPAL 只有 0/1 标签，逐字 1–5 无直接 gold。
