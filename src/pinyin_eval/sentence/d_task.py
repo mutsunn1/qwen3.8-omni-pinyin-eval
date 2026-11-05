@@ -41,6 +41,7 @@ from ..config import Config
 from ..stats import (
     bootstrap_ci,
     holm_correct,
+    mcnemar_test,
     paired_bootstrap_difference,
 )
 from .normalize import align_char_sequences, t2s
@@ -114,13 +115,22 @@ class DReportError(RuntimeError):
 def normalize_text(text: str) -> str:
     """D input-text normalisation: NFKC, t2s, strip punctuation/whitespace.
 
-    Only Han characters are kept (the OMPAL reference texts are pure Han); this
-    is the *alignment* text.  For ``D-asr`` the raw ASR output is stored
-    separately and never edited.
+    Keeps Han **and** letters/digits (the ASR occasionally emits Latin tokens,
+    e.g. ``我the需...``): the design (A.2) only asks for NFKC + removal of
+    punctuation/whitespace + OpenCC t2s.  Deleting Latin characters would make
+    the input text shorter than the model's per-character alignment array and
+    silently turn ASR substitutions into deletions.  For ``D-asr`` the raw ASR
+    output is archived separately and never edited.
     """
     body = unicodedata.normalize("NFKC", text or "")
     body = t2s(body)
-    return "".join(ch for ch in body if _HAN_RE.match(ch))
+    out: list[str] = []
+    for ch in body:
+        category = unicodedata.category(ch)
+        if category.startswith(("P", "Z", "C")) or ch.isspace():
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def _chars(text: str) -> list[str]:
@@ -222,6 +232,64 @@ def gold_alignment(
 # ---------------------------------------------------------------------------
 
 
+def _opencc_s2t():
+    try:  # pragma: no cover - optional dependency path
+        from opencc import OpenCC
+
+        return OpenCC("s2t")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _aishell_homophone_pool(cfg: Config) -> dict[str, list[str]]:
+    """Build a large traditional-character homophone pool from AISHELL-3 labels.
+
+    The OMPAL corpus alone has only 337 distinct characters, so same-syllable
+    substitutions often fall back to frequent characters.  AISHELL-3's released
+    train label file gives ~60k char/pinyin pairs; converting the (simplified)
+    characters to traditional via OpenCC s2t grows the homophone pool while
+    staying inside the "同音/近音/常见混淆字表" rule of design A.2.
+    """
+    label_path = cfg.repo_root / "data/sentence/aishell3/label_train-set.txt"
+    if not label_path.exists():
+        return {}
+    import re as _re
+
+    from .normalize import align_gold
+
+    converter = _opencc_s2t()
+    pool: dict[str, list[str]] = {}
+    seen: set[tuple[str, str]] = set()
+    marks = _re.compile(r"[%$]")
+    with label_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.split("|")
+            if len(parts) != 3:
+                continue
+            _uid, pinyin, text = parts
+            chars = marks.sub("", text)
+            tokens = marks.sub("", pinyin).split()
+            gold = align_gold(chars, tokens)
+            if gold is None:
+                continue
+            for syllable in gold:
+                if not syllable.surface or syllable.tone not in (1, 2, 3, 4, 5):
+                    continue
+                char = syllable.char
+                if converter is not None:
+                    char = converter.convert(char)
+                key = f"{syllable.surface}{syllable.tone}"
+                entry = (key, char)
+                if entry in seen:
+                    continue
+                seen.add(entry)
+                pool.setdefault(key, []).append(char)
+    return pool
+
+
 def build_substitution_pools(texts: Iterable[str]) -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
     """Build homophone / near-homophone substitution pools from the corpus.
 
@@ -260,41 +328,100 @@ def inject_errors(
     if n == 0:
         return [], []
     rng = random.Random(seed)
-    k = max(2, int(round(n * ratio)))
-    n_sub = int(round(k * mix["sub"]))
-    n_del = int(round(k * mix["del"]))
-    n_ins = max(1, k - n_sub - n_del)
-    positions = rng.sample(range(n), min(n, n_sub + n_del))
-    sub_positions = positions[:n_sub]
-    del_positions = positions[n_sub : n_sub + n_del]
+    k = max(1, int(round(n * ratio)))
+    positions = rng.sample(range(n), min(n, k))
+    # one operation per perturbed character, drawn with the design's 6:2:2 mix;
+    # expected aggregate mix is 6:2:2 (2:3:5 style rounding artifacts avoided by
+    # drawing the op stochastically instead of splitting k deterministically).
+    choices = ("sub", "del", "ins")
+    weights = (float(mix.get("sub", 0.6)), float(mix.get("del", 0.2)), float(mix.get("ins", 0.2)))
+    decisions = [(position, rng.choices(choices, weights=weights, k=1)[0]) for position in positions]
     ops: list[dict[str, Any]] = []
     syllables = _pinyin_syllables(chars)
-    for position in sorted(sub_positions, reverse=True):
+    # apply right-to-left so earlier indices stay valid
+    for position, op in sorted(decisions, key=lambda item: item[0], reverse=True):
         original = chars[position]
-        syllable = syllables[position]
-        candidates = [c for c in toned_pool.get(syllable, []) if c != original]
-        if not candidates:
-            toneless = re.sub(r"[1-5]$", "", syllable)
-            candidates = [c for c in toneless_pool.get(toneless, []) if c != original]
-        if not candidates:
-            candidates = [c for c in insertion_pool if c != original]
-        replacement = rng.choice(sorted(candidates)) if candidates else original
-        chars[position] = replacement
-        ops.append({"op": "sub", "position": position, "gold": original, "new": replacement})
-    for position in sorted(del_positions, reverse=True):
-        removed = chars.pop(position)
-        ops.append({"op": "del", "position": position, "gold": removed, "new": None})
-    for _ in range(n_ins):
-        position = rng.randrange(len(chars) + 1)
-        inserted = rng.choice(sorted(insertion_pool)) if insertion_pool else "的"
-        chars.insert(position, inserted)
-        ops.append({"op": "ins", "position": position, "gold": None, "new": inserted})
+        if op == "sub":
+            syllable = syllables[position]
+            candidates = [c for c in toned_pool.get(syllable, []) if c != original]
+            if not candidates:
+                toneless = re.sub(r"[1-5]$", "", syllable)
+                candidates = [c for c in toneless_pool.get(toneless, []) if c != original]
+            if not candidates:
+                candidates = [c for c in insertion_pool if c != original]
+            replacement = rng.choice(sorted(candidates)) if candidates else original
+            chars[position] = replacement
+            ops.append({"op": "sub", "position": position, "gold": original, "new": replacement})
+        elif op == "del":
+            removed = chars.pop(position)
+            ops.append({"op": "del", "position": position, "gold": removed, "new": None})
+        else:  # insertion before the selected character
+            inserted = rng.choice(sorted(insertion_pool)) if insertion_pool else "的"
+            chars.insert(position, inserted)
+            ops.append({"op": "ins", "position": position, "gold": None, "new": inserted})
     return chars, ops
 
 
 # ---------------------------------------------------------------------------
 # Data preparation: build the D item manifest
 # ---------------------------------------------------------------------------
+
+
+def _asr_quality(source_summary: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalise the ASR summary's text-quality block into the report schema.
+
+    ``scripts/run_d_asr.py`` writes ``text_quality`` with
+    ``sdi={substitutions, deletions, insertions, substitution_rate, ...}`` and
+    ``normalization_rate={..., "rate": float}``; this helper maps it (and tolerates
+    older/renamed keys) to the flat keys used by the task-D report.
+    """
+    summary = source_summary or {}
+    quality = summary.get("quality") or summary.get("text_quality") or {}
+    if not isinstance(quality, Mapping):
+        return {}
+    sdi = quality.get("sdi") if isinstance(quality.get("sdi"), Mapping) else {}
+    normalization_raw = quality.get("normalization_rate")
+    if isinstance(normalization_raw, Mapping):
+        normalization = normalization_raw.get("rate")
+    else:
+        normalization = normalization_raw
+    per_learner = quality.get("per_learner_cer")
+    per_learner = per_learner if isinstance(per_learner, Mapping) else {}
+
+    def _first(mapping: Mapping[str, Any], *keys: str) -> Any:
+        for key in keys:
+            value = mapping.get(key)
+            if value is not None:
+                return value
+        return None
+
+    return {
+        "cer_micro": quality.get("cer_micro"),
+        "cer_mean": _first(quality, "cer_mean_utterance", "cer_mean"),
+        "cer_median": _first(quality, "cer_median_utterance", "cer_median"),
+        "cer_p90": _first(quality, "cer_p90_utterance", "cer_p90"),
+        "sentence_exact_rate": quality.get("sentence_exact_rate"),
+        "n_sub": _first(sdi, "substitutions", "n_sub"),
+        "n_del": _first(sdi, "deletions", "n_del"),
+        "n_ins": _first(sdi, "insertions", "n_ins"),
+        "sub_ratio": _first(sdi, "substitution_rate", "sub_ratio"),
+        "del_ratio": _first(sdi, "deletion_rate", "del_ratio"),
+        "ins_ratio": _first(sdi, "insertion_rate", "ins_ratio"),
+        "normalization_rate": normalization,
+        "learner_cer_median": per_learner.get("median"),
+        "learner_cer_p90": per_learner.get("p90"),
+        "learner_cer_max": per_learner.get("max"),
+    }
+
+
+def _sha256_file(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _item_source_fields(item: SentenceItem) -> dict[str, Any]:
@@ -337,15 +464,30 @@ def build_d_items(
             f"ASR outputs missing ({asr_outputs}); run scripts/run_d_asr.py first "
             "or build only the gold/inject sources with require_asr=False"
         )
+    if require_asr and limit is None and len(asr_by_utt) < len(b_rows):
+        raise DReportError(
+            f"ASR outputs incomplete: {len(asr_by_utt)} ok of {len(b_rows)} learner "
+            "utterances; finish scripts/run_d_asr.py before building the full D manifest "
+            "(use --limit for an explicit smoke build)"
+        )
 
     seed = int(cfg.get("sentence.d.seed", D_PREP_SEED))
     source_names = list(cfg.get("sentence.d.sources") or TEXT_SOURCES)
     toned_pool, toneless_pool, insertion_pool = build_substitution_pools(
         row.get("chars") or row.get("text") or "" for row in b_rows
     )
+    extra_pool = _aishell_homophone_pool(cfg)
+    for syllable, chars in extra_pool.items():
+        merged = sorted(set(toned_pool.get(syllable, [])) | set(chars))
+        toned_pool[syllable] = merged
+        toneless_key = re.sub(r"[1-5]$", "", syllable)
+        toneless_pool[toneless_key] = sorted(
+            set(toneless_pool.get(toneless_key, [])) | set(merged)
+        )
 
     items: list[SentenceItem] = []
     injection_stats: Counter[str] = Counter()
+    injection_chars = 0
     asr_missing: list[str] = []
     skipped: list[dict[str, Any]] = []
     for row in b_rows:
@@ -387,6 +529,7 @@ def build_d_items(
                 continue
             if source == "D-inject-10":
                 injection_stats["n_items"] += 1
+                injection_chars += len(gold_text)
                 for op in ops:
                     injection_stats[op["op"]] += 1
             meta = dict(base.meta or {})
@@ -440,12 +583,24 @@ def build_d_items(
         "n_asr_missing": len(asr_missing),
         "asr_missing": asr_missing[:100],
         "skipped": skipped[:100],
-        "injection": dict(injection_stats),
+        "injection": {
+            **dict(injection_stats),
+            "n_chars": injection_chars,
+            "n_perturbed": sum(injection_stats.get(op, 0) for op in ("sub", "del", "ins")),
+            "ratio": (
+                sum(injection_stats.get(op, 0) for op in ("sub", "del", "ins")) / injection_chars
+                if injection_chars else None
+            ),
+        },
         "asr": {
             "model_id": asr_summary.get("model_id"),
             "device": asr_summary.get("device"),
             "n_ok": asr_summary.get("n_ok"),
-            "quality": asr_summary.get("quality"),
+            "n_expected": len(b_rows),
+            "n_missing": len(asr_missing),
+            "quality": _asr_quality(asr_summary),
+            "outputs_sha256": _sha256_file(Path(asr_outputs)),
+            "summary_sha256": _sha256_file(Path(asr_summary_path)),
         },
         "gold_alignment": {
             "n_deletions_gold": sum(
@@ -524,18 +679,34 @@ def _as_score(value: Any) -> float | None:
     return round(min(5.0, max(1.0, number)), 2)
 
 
+_ERROR_TYPE_TABLE: dict[str, str] = {
+    "tone": "tone", "声调": "tone",
+    "consonant": "consonant", "声母": "consonant", "initial": "consonant",
+    "vowel": "vowel", "韵母": "vowel", "final": "vowel",
+}
+_NO_ERROR_VALUES = {"", "none", "null", "nil", "ok", "correct", "无", "没有", "无错误", "正确"}
+
+
 def _as_error_type(value: Any) -> str | None:
+    """Parse the design A.3 ``error_type`` value (English or Chinese labels).
+
+    ``none`` / ``null`` mean "no pronunciation error"; an unknown label is
+    ``None`` (excluded from the localization confusion counts).
+    """
     if value is None:
         return None
-    text = normalize_text(str(value)).lower()
-    if text in {"", "无", "none", "null", "ok", "correct"}:
+    raw = str(value).strip().lower()
+    if raw in _NO_ERROR_VALUES:
         return "none"
-    table = {
-        "tone": "tone", "声调": "tone",
-        "consonant": "consonant", "声母": "consonant", "initial": "consonant",
-        "vowel": "vowel", "韵母": "vowel", "final": "vowel",
-    }
-    return table.get(text) or table.get(str(value).strip().lower())
+    if raw in _ERROR_TYPE_TABLE:
+        return _ERROR_TYPE_TABLE[raw]
+    han = normalize_text(raw)
+    if han in _ERROR_TYPE_TABLE:
+        return _ERROR_TYPE_TABLE[han]
+    for token, mapped in _ERROR_TYPE_TABLE.items():
+        if token in raw or token in han:
+            return mapped
+    return None
 
 
 def parse_task_d(text: str) -> dict[str, Any]:
@@ -547,6 +718,9 @@ def parse_task_d(text: str) -> dict[str, Any]:
     if status != "ok":
         return result
     obj = _extract_json(text)
+    if isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], dict):
+        # some replies wrap the requested object in a one-element array
+        obj = obj[0]
     if not isinstance(obj, dict):
         result["parse_status"] = "parse_error"
         result["detail"] = "no JSON object found"
@@ -597,22 +771,37 @@ def parse_task_d(text: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def map_hyp_entries(
+def map_hyp_entries_with_extras(
     hyp: Sequence[Mapping[str, Any]], text_chars: Sequence[str]
-) -> list[Mapping[str, Any] | None]:
-    """Map the model's alignment array onto the input text positions."""
+) -> tuple[list[Mapping[str, Any] | None], list[Mapping[str, Any]]]:
+    """Map the model's alignment array onto the input text positions.
+
+    Returns ``(mapped, extras)`` where ``mapped[i]`` is the entry for input char
+    ``i`` (or ``None``) and ``extras`` are model entries with no input position
+    (design A.3: 多字单独统计).
+    """
     if len(hyp) == len(text_chars):
-        return list(hyp)
+        return list(hyp), []
     hyp_texts = [normalize_text(str(entry.get("text") or "")) or "?" for entry in hyp]
     pairs, _ins, _dele = align_char_sequences(  # align hyp texts to the input text
         [normalize_text(ch) or "?" for ch in text_chars], hyp_texts
     )
     out: list[Mapping[str, Any] | None] = [None] * len(text_chars)
+    used: set[int] = set()
     for text_idx, hyp_idx in pairs:
         if hyp_idx is None:
             continue
         out[text_idx] = hyp[hyp_idx]
-    return out
+        used.add(hyp_idx)
+    extras = [entry for index, entry in enumerate(hyp) if index not in used]
+    return out, extras
+
+
+def map_hyp_entries(
+    hyp: Sequence[Mapping[str, Any]], text_chars: Sequence[str]
+) -> list[Mapping[str, Any] | None]:
+    """Backwards-compatible wrapper returning only the mapped entries."""
+    return map_hyp_entries_with_extras(hyp, text_chars)[0]
 
 
 def _row_envelope(item: SentenceItem, condition: str, parse_status: str) -> dict[str, Any]:
@@ -640,6 +829,9 @@ def score_d(item: SentenceItem, parsed: Mapping[str, Any], condition: str = "") 
     text_chars = _chars(item.text or "")
     row["n_text_chars"] = len(text_chars)
     row["n_gold_chars"] = len(gold_alignment)
+    alignment_stats = meta.get("gold_alignment_stats") or {}
+    row["n_gold_chars_source"] = int(alignment_stats.get("n_gold_chars", 0) or 0)
+    row["n_gold_deletions"] = int(alignment_stats.get("n_deletions_gold", 0) or 0)
     rows_fields = (
         ["align_tp", "align_fp", "align_fn", "align_tn",
          "terr_tp", "terr_fp", "terr_fn", "terr_tn"]
@@ -651,6 +843,9 @@ def score_d(item: SentenceItem, parsed: Mapping[str, Any], condition: str = "") 
         {
             "n_outputs": 0,
             "n_mapped": 0,
+            "n_outputs_extra": 0,
+            "n_extra_aligned": 0,
+            "n_text_copy_mismatch": 0,
             "output_coverage": 0.0,
             "n_localizable": 0,
             "n_score": 0,
@@ -668,9 +863,16 @@ def score_d(item: SentenceItem, parsed: Mapping[str, Any], condition: str = "") 
         return row
     hyp = list(parsed.get("alignment") or [])
     row["n_outputs"] = len(hyp)
-    mapped = map_hyp_entries(hyp, text_chars)
+    mapped, extras = map_hyp_entries_with_extras(hyp, text_chars)
     row["n_mapped"] = sum(1 for entry in mapped if entry is not None)
+    row["n_outputs_extra"] = len(extras)
+    row["n_extra_aligned"] = sum(1 for entry in extras if entry.get("aligned"))
     row["output_coverage"] = row["n_mapped"] / len(text_chars) if text_chars else 0.0
+    for position, entry in zip(text_chars, mapped, strict=False):
+        if entry is None:
+            continue
+        if normalize_text(str(entry.get("text") or "")) != normalize_text(position):
+            row["n_text_copy_mismatch"] += 1
     for index, gold in enumerate(gold_alignment):
         entry = mapped[index] if index < len(mapped) else None
         gold_aligned = bool(gold.get("aligned"))
@@ -686,20 +888,23 @@ def score_d(item: SentenceItem, parsed: Mapping[str, Any], condition: str = "") 
                 row["align_fp"] += 1
             else:
                 row["align_tn"] += 1
-        if entry is not None:
-            pred_text_error = entry.get("text_error")
-            if pred_text_error is not None and gold_text_correct is not None:
-                gold_error = not bool(gold_text_correct)
-                if gold_error:
-                    if pred_text_error:
-                        row["terr_tp"] += 1
-                    else:
-                        row["terr_fn"] += 1
-                else:
-                    if pred_text_error:
-                        row["terr_fp"] += 1
-                    else:
-                        row["terr_tn"] += 1
+        # text-error confusion (design A.4): insertion -> text_error_gold = True,
+        # substitution -> text_error_gold = not text_correct, matched -> same.
+        if gold_aligned:
+            gold_text_error = gold_text_correct is not None and not bool(gold_text_correct)
+        else:
+            gold_text_error = True
+        pred_text_error = bool(entry.get("text_error")) if entry is not None else False
+        if gold_text_error:
+            if pred_text_error:
+                row["terr_tp"] += 1
+            else:
+                row["terr_fn"] += 1
+        else:
+            if pred_text_error:
+                row["terr_fp"] += 1
+            else:
+                row["terr_tn"] += 1
         # error localization: gold text-correct + aligned chars only
         if not gold_aligned or not gold_text_correct:
             continue
@@ -741,6 +946,9 @@ def score_d(item: SentenceItem, parsed: Mapping[str, Any], condition: str = "") 
             else:
                 row["n_score_correct"] += 1
                 row["score_sum_correct"] += value
+    # model entries with no input position: an "aligned=True" claim for a
+    # non-existent input character is an alignment false positive (A.3 多字统计)
+    row["align_fp"] += row["n_extra_aligned"]
     scores = parsed.get("scores") or {}
     for dimension in D_SCORE_DIMENSIONS:
         row[f"pred_{dimension}"] = scores.get(dimension)
@@ -896,6 +1104,8 @@ def _headline_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     n_text = sum(int(row.get("n_text_chars", 0) or 0) for row in ok_rows)
     n_mapped = sum(int(row.get("n_mapped", 0) or 0) for row in ok_rows)
     n_localizable = sum(int(row.get("n_localizable", 0) or 0) for row in ok_rows)
+    n_gold_source = sum(int(row.get("n_gold_chars_source", 0) or 0) for row in ok_rows)
+    n_gold_deletions = sum(int(row.get("n_gold_deletions", 0) or 0) for row in ok_rows)
     return {
         "n_items": len(rows),
         "n_parse_ok": len(ok_rows),
@@ -905,6 +1115,9 @@ def _headline_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "output_coverage_rate": _ratio(n_mapped, n_text),
         "n_text_chars": n_text,
         "n_localizable": n_localizable,
+        "gold_side_coverage": (
+            None if not n_gold_source else 1.0 - (n_gold_deletions / n_gold_source)
+        ),
         "alignment": alignment,
         "text_error": text_error,
         "localization": localization,
@@ -1081,16 +1294,28 @@ def compare_d_sources(
             if base_exact is not None and other_exact is not None:
                 outcomes.append((base_exact, other_exact))
         if outcomes:
-            b_count = sum(1 for a, o in outcomes if a and not o)
-            c_count = sum(1 for a, o in outcomes if o and not a)
-            entry["alignment_exact"] = {"n_pairs": len(outcomes), "only_baseline": b_count,
-                                        "only_other": c_count}
+            b_count = sum(1 for base, other in outcomes if base and not other)
+            c_count = sum(1 for base, other in outcomes if other and not base)
+            mcnemar = mcnemar_test([pair[0] for pair in outcomes], [pair[1] for pair in outcomes])
+            entry["alignment_exact"] = {
+                "n_pairs": len(outcomes),
+                "only_baseline": b_count,
+                "only_other": c_count,
+                "p_value": mcnemar.get("p_value"),
+                "method": mcnemar.get("method"),
+            }
+            pvalues[source] = float(mcnemar["p_value"])
     # Holm correction on any p-values produced (currently none from bootstrap diffs)
     metrics = sorted({metric for entry in comparisons.values()
                       for metric in entry.get("difference", {})})
-    holm = holm_correct([pvalues[key] for key in sorted(pvalues)]) if pvalues else []
-    return {"baseline": baseline, "comparisons": comparisons, "holm": dict(zip(sorted(pvalues), holm, strict=False)),
-            "metrics": metrics}
+    ordered_sources = sorted(pvalues)
+    holm_values = holm_correct([pvalues[source] for source in ordered_sources]) if pvalues else []
+    return {
+        "baseline": baseline,
+        "comparisons": comparisons,
+        "metrics": metrics,
+        "alignment_exact_holm": dict(zip(ordered_sources, holm_values, strict=False)),
+    }
 
 
 def _row_alignment_exact(row: Mapping[str, Any]) -> bool | None:
@@ -1123,7 +1348,7 @@ def _usage_for_source(cost: Mapping[str, Any], source: str) -> dict[str, Any]:
 def acceptance_d(
     metrics_by_source: Mapping[str, Mapping[str, Any]],
     cost: Mapping[str, Any],
-    asr_archived: bool,
+    asr_archived: bool | Mapping[str, Any],
 ) -> dict[str, Any]:
     """Design §A.8 acceptance gates for task D."""
     parse_success: dict[str, Any] = {}
@@ -1153,7 +1378,24 @@ def acceptance_d(
         "threshold": D_ACCEPTANCE["max_cost_cny"],
         "passed": total_cost is not None and float(total_cost) <= D_ACCEPTANCE["max_cost_cny"],
     }
-    asr_block = {"archived": bool(asr_archived), "passed": bool(asr_archived)}
+    if isinstance(asr_archived, Mapping):
+        n_expected = int(asr_archived.get("n_expected") or 0)
+        n_missing = int(asr_archived.get("n_missing", 0) or 0)
+        n_ok = int(asr_archived.get("n_ok") or 0)
+        complete = n_missing == 0 and (n_expected == 0 or n_ok >= n_expected)
+        asr_block = {
+            "archived": True,
+            "n_expected": n_expected,
+            "n_ok": n_ok,
+            "n_missing": n_missing,
+            "outputs_sha256": asr_archived.get("outputs_sha256"),
+            "summary_sha256": asr_archived.get("summary_sha256"),
+            "complete": complete,
+            "passed": complete,
+        }
+    else:
+        asr_block = {"archived": bool(asr_archived), "complete": bool(asr_archived),
+                     "passed": bool(asr_archived)}
     passed = (
         all(entry["passed"] for entry in parse_success.values())
         and all(entry["passed"] for entry in coverage.values())
@@ -1251,6 +1493,8 @@ def render_d_markdown(payload: Mapping[str, Any]) -> str:
         quality_rows = [
             ("CER（micro，字符）", _fmt(asr_quality.get("cer_micro"))),
             ("CER（按句平均）", _fmt(asr_quality.get("cer_mean"))),
+            ("句级完全一致率（ASR vs gold）", _fmt_pct(asr_quality.get("sentence_exact_rate"))),
+            ("CER 中位 / p90（按句）", f"{_fmt(asr_quality.get('cer_median'))} / {_fmt(asr_quality.get('cer_p90'))}"),
             ("S / D / I", f"{_fmt(asr_quality.get('n_sub'))} / {_fmt(asr_quality.get('n_del'))} / {_fmt(asr_quality.get('n_ins'))}"),
             ("S/D/I 比例", f"{_fmt(asr_quality.get('sub_ratio'))} / {_fmt(asr_quality.get('del_ratio'))} / {_fmt(asr_quality.get('ins_ratio'))}"),
             ("ASR normalization rate", _fmt_pct(asr_quality.get("normalization_rate"))),
@@ -1267,6 +1511,23 @@ def render_d_markdown(payload: Mapping[str, Any]) -> str:
         lines.append("_ASR 质量摘要不可用。_")
     lines.append("")
 
+    inject_quality = next(
+        (source.get("text_quality") for source in (payload.get("metrics") or {}).values()
+         if isinstance(source, Mapping) and source.get("source") == "D-inject-10"),
+        None,
+    )
+    if inject_quality:
+        lines.append("**D-inject-10 受控错误统计**")
+        lines.append("")
+        lines.extend(_md_table(
+            ("项", "值"),
+            [
+                ("扰动字符 / 总字符", f"{_fmt(inject_quality.get('n_perturbed'))} / {_fmt(inject_quality.get('n_chars'))}"),
+                ("实际扰动比例", _fmt_pct(inject_quality.get("inject_ratio"))),
+                ("sub / del / ins", f"{_fmt(inject_quality.get('n_sub'))} / {_fmt(inject_quality.get('n_del'))} / {_fmt(inject_quality.get('n_ins'))}"),
+            ],
+        ))
+        lines.append("")
     lines.append("## 3. 输出格式质量与对齐")
     lines.append("")
     format_rows = []
@@ -1280,6 +1541,7 @@ def render_d_markdown(payload: Mapping[str, Any]) -> str:
                 _fmt(metrics.get("n_parse_ok")),
                 _fmt_pct(metrics.get("parse_failure_rate")),
                 _fmt_pct(metrics.get("alignment_coverage")),
+                _fmt_pct(metrics.get("gold_side_coverage")),
             ]
         )
         alignment = metrics.get("alignment") or {}
@@ -1293,11 +1555,29 @@ def render_d_markdown(payload: Mapping[str, Any]) -> str:
                 _fmt_ci(with_ci),
             ]
         )
-    lines.extend(_md_table(("文本条件", "items", "parse-ok", "解析失败率", "输入字覆盖率"), format_rows))
+    lines.extend(_md_table(
+        ("文本条件", "items", "parse-ok", "解析失败率", "输入字覆盖率", "gold-side 覆盖率"),
+        format_rows,
+    ))
     lines.append("")
     lines.extend(_md_table(("文本条件", "对齐 precision", "recall", "F1", "F1 95% CI"), alignment_rows))
     lines.append("")
-    lines.append("_对齐正类 = gold aligned（输入字有 OMPAL gold 对应）；文本错误指标见附录 CSV。_")
+    lines.append("_对齐正类 = gold aligned（输入字有 OMPAL gold 对应）。_")
+    lines.append("")
+    terr_rows = []
+    for source in payload.get("sources") or []:
+        metrics = (payload.get("metrics") or {}).get(source) or {}
+        text_error = metrics.get("text_error") or {}
+        with_ci = (metrics.get("with_ci") or {}).get("text_error_f1") or {}
+        terr_rows.append([source, _fmt(text_error.get("precision")),
+                          _fmt(text_error.get("recall")), _fmt(text_error.get("f1")),
+                          _fmt_ci(with_ci)])
+    lines.extend(_md_table(("文本条件", "text_error precision", "recall", "F1", "F1 95% CI"), terr_rows))
+    lines.append("")
+    lines.append(
+        "_text_error 正类 = gold text_error（substitution 与 insertion 都算文本错误，"
+        "见设计 A.4）；模型漏输出的输入字按「未声称文本错误」计入。_"
+    )
     lines.append("")
 
     lines.append("## 4. 发音错误定位（仅 text-correct + aligned 字）")
@@ -1365,15 +1645,43 @@ def render_d_markdown(payload: Mapping[str, Any]) -> str:
             diff = differences.get(metric) or {}
             cmp_rows.append([source, metric, _fmt(diff.get("estimate")), _fmt_ci(diff)])
     if cmp_rows:
-        lines.extend(_md_table(("文本条件", "指标", "Δ vs D-gold", "95% CI"), cmp_rows))
+        lines.extend(_md_table(("文本条件", "指标", "Δ(D-gold − 条件)", "95% CI"), cmp_rows))
     else:
         lines.append("_退化对比不可用。_")
     lines.append("")
     lines.append(
         f"- 配对单位：同一 utterance 在两个文本条件下都有 parse-ok 行；"
-        f"Δ = 该条件 − {comparisons.get('baseline') or 'D-gold'}；负值表示相对上界退化。"
+        f"Δ = {comparisons.get('baseline') or 'D-gold'} − 该条件。"
+        "对 alignment/macro-F1/Pearson：**正值 = 该条件相对上界退化**；"
+        "对 MAE：**负值 = 该条件误差更大（退化）**，正值表示误差更小。"
     )
     lines.append("")
+    exact_rows = []
+    holm = comparisons.get("alignment_exact_holm") or {}
+    for source, entry in (comparisons.get("comparisons") or {}).items():
+        exact = entry.get("alignment_exact") or {}
+        if not exact:
+            continue
+        exact_rows.append([
+            source,
+            _fmt(exact.get("n_pairs")),
+            _fmt(exact.get("only_baseline")),
+            _fmt(exact.get("only_other")),
+            _fmt(exact.get("p_value")),
+            _fmt(holm.get(source)),
+            str(exact.get("method") or "—"),
+        ])
+    if exact_rows:
+        lines.append("**整句对齐完全正确（逐 utterance）的配对检验**")
+        lines.append("")
+        lines.extend(_md_table(
+            ("文本条件", "n_pairs", "仅 D-gold 完全正确", "仅该条件完全正确",
+             "McNemar p", "Holm p", "方法"),
+            exact_rows,
+        ))
+        lines.append("")
+        lines.append("_族内 Holm 校正覆盖各文本条件 × alignment-exact 一项。_")
+        lines.append("")
 
     lines.append("## 7. 逐字 score（描述性）")
     lines.append("")
@@ -1453,7 +1761,7 @@ def build_d_report(cfg: Config, run_id: str, *, n_boot: int | None = None) -> di
     alpha = float(stats_cfg.get("alpha", 0.05))
     seed = int(cfg.get("sentence.d.seed", D_PREP_SEED))
     asr_summary = _load_json_if_exists(Path(cfg.get("sentence.d.asr_summary", "data/sentence/d_asr/d_asr_summary.json")))
-    asr_quality = (asr_summary or {}).get("quality") or {}
+    asr_quality = _asr_quality(asr_summary)
     metrics_by_source: dict[str, Any] = {}
     for source in sources:
         text_quality = None
@@ -1461,14 +1769,14 @@ def build_d_report(cfg: Config, run_id: str, *, n_boot: int | None = None) -> di
             text_quality = asr_quality
         elif source == "D-inject-10":
             injection = prepared.get("injection") or {}
-            n_items = int(injection.get("n_items", 0) or 0)
-            substitutions = int(injection.get("sub", 0) or 0)
-            deletions = int(injection.get("del", 0) or 0)
-            insertions = int(injection.get("ins", 0) or 0)
             text_quality = {
-                "n_items": n_items,
-                "n_sub": substitutions, "n_del": deletions, "n_ins": insertions,
-                "inject_ratio": (substitutions + deletions + insertions) / n_items if n_items else None,
+                "n_items": int(injection.get("n_items", 0) or 0),
+                "n_sub": int(injection.get("sub", 0) or 0),
+                "n_del": int(injection.get("del", 0) or 0),
+                "n_ins": int(injection.get("ins", 0) or 0),
+                "n_chars": int(injection.get("n_chars", 0) or 0),
+                "n_perturbed": int(injection.get("n_perturbed", 0) or 0),
+                "inject_ratio": injection.get("ratio"),
             }
         metrics_by_source[source] = task_d_metrics(
             rows_by_source[source], source, n_boot=n_boot, alpha=alpha, seed=seed,
@@ -1477,7 +1785,9 @@ def build_d_report(cfg: Config, run_id: str, *, n_boot: int | None = None) -> di
     comparisons = compare_d_sources(rows_by_source, baseline="D-gold",
                                     n_boot=n_boot, alpha=alpha, seed=seed)
     cost = _load_json_if_exists(run_dir / "cost_summary.json") or _cost_summary_from_generations(cfg, run_dir)
-    acceptance = acceptance_d(metrics_by_source, cost, asr_archived=bool(asr_summary))
+    acceptance = acceptance_d(
+        metrics_by_source, cost, asr_archived=prepared.get("asr") or bool(asr_summary)
+    )
     payload = {
         "run_id": run_id,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),

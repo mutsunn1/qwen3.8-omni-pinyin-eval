@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_estimate)
 
     p = sub.add_parser("smoke", help="one real call per task to verify output format")
-    p.add_argument("--task", default="A", choices=list(TASKS))
+    p.add_argument("--task", default="A", choices=[*TASKS, "D"])
     p.add_argument("--condition", default="C1", choices=list(CONDITIONS))
     p.add_argument("--item-index", type=int, default=0)
     p.set_defaults(func=cmd_smoke)
@@ -241,7 +241,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             "duration_s_median": round(sorted(durations)[len(durations) // 2], 2)
             if durations else None,
         }
-        total_planned += len(rows) * len(CONDITIONS)
+        total_planned += len(rows) * (1 if task == "D" else len(CONDITIONS))
     report["tasks"] = tasks
     report["planned_calls"] = total_planned
     report["conditions"] = {
@@ -254,6 +254,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     from .prompts import PROMPT_VERSION, prompt_fingerprints
 
     report["prompt_version"] = PROMPT_VERSION
+    report["prompt_versions"] = {
+        task: ("sentence-d-v1" if task == "D" else PROMPT_VERSION) for task in check_tasks
+    }
     report["prompt_fingerprints"] = prompt_fingerprints()
     report["budget_cny"] = cfg.get("sentence.budget_cny")
     print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -303,14 +306,18 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         print("no items", file=sys.stderr)
         return 1
     item = items[min(args.item_index, len(items) - 1)]
-    from .prompts import build_prompt, prompt_sha256
+    from .prompts import build_prompt, prompt_sha256, prompt_version_for_task
 
     system_prompt, user_prompt = build_prompt(task, item)
-    table = {"C1": {"thinking": False, "max_tokens": int(
-        (cfg.get("sentence.conditions.C1") or {}).get("max_tokens", 256))},
-        "C2": {"thinking": True, "max_tokens": int(
-            (cfg.get("sentence.conditions.C2") or {}).get("max_tokens", 1024))}}
-    spec = table[args.condition]
+    def _spec(name: str) -> dict:
+        cond = cfg.get(f"sentence.conditions.{name}") or {}
+        return {
+            "thinking": bool(cond.get("thinking", name == "C2")),
+            "max_tokens": int((cond.get("max_tokens_by_task") or {}).get(
+                task, cond.get("max_tokens", 1024 if name == "C2" else 256))),
+        }
+
+    spec = _spec(args.condition)
     client = create_client(cfg)
     request = ChatRequest(
         request_id=make_request_id(task, args.condition, item.item_id),
@@ -333,7 +340,9 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         "task": task,
         "condition": args.condition,
         "item_id": item.item_id,
-        "prompt_sha256": prompt_sha256(system_prompt, user_prompt),
+        "prompt_version": prompt_version_for_task(task),
+        "prompt_sha256": prompt_sha256(system_prompt, user_prompt,
+                                       prompt_version_for_task(task)),
         "audio_path": item.audio_path,
         "duration_s": item.duration_s,
         "ok": response.ok,
@@ -352,6 +361,14 @@ def cmd_smoke(args: argparse.Namespace) -> int:
 
 def cmd_generate(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
+    tasks = _parse_tasks(args.tasks)
+    if "D" in tasks:
+        conditions = _parse_conditions(args.conditions)
+        if "C2" in conditions:
+            print("[generate] task D is C1-only (design A.6); dropping C2", file=sys.stderr)
+        args.conditions = "C1"
+        if args.budget_cny is None:
+            args.budget_cny = cfg.get("sentence.d.budget_cny", 10.0)
     plans = _plans_from_args(args, cfg)
     run_id = args.run_id or new_run_id()
     budget = args.budget_cny if args.budget_cny is not None else cfg.get("sentence.budget_cny")
@@ -513,13 +530,26 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 def cmd_d_prepare(args: argparse.Namespace) -> int:
     from . import d_task
+    from .records import write_jsonl
 
     cfg = _cfg(args)
     items, summary = d_task.build_d_items(
         cfg, limit=args.limit, require_asr=bool(getattr(args, "require_asr", True))
     )
     manifest_dir = sentence_manifest_dir(cfg)
-    d_task.write_jsonl(manifest_dir / "d_items.jsonl", items)
+    write_jsonl(manifest_dir / "d_items.jsonl", items)
+    injected = [
+        {
+            "utt_id": item.meta.get("utt_id"),
+            "text_source": "D-inject-10",
+            "gold_text": item.meta.get("gold_text"),
+            "injected_text": item.text,
+            "ops": item.meta.get("injection_ops") or [],
+        }
+        for item in items
+        if item.meta.get("text_source") == "D-inject-10"
+    ]
+    write_jsonl(manifest_dir / "d_injected_10.jsonl", injected)
     (manifest_dir / "d_prep_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

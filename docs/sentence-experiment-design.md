@@ -1,9 +1,9 @@
 # Qwen3.8-Omni 整句拼音评测实验设计（pilot）
 
-> 状态：设计稿 v0.2（2026-11-03）· A/B/C 已实现并完成 pilot 运行（2026-11-02）；附录 A 任务 D 为新增设计，尚未运行
-> 实现与结果：[[Qwen 3.8 omni 整句拼音评测实验报告]]
-> 关联：[[Qwen 3.8 omni 音素识别实验设计]] · [[Qwen 3.8 omni 最简实验报告]] ·
-> [[Qwen 3.8 omni 三模型详细对比]]
+> 状态：设计稿 v0.2（2026-11-03）· A/B/C 已完成 pilot 运行（2026-11-02）；**附录 A 任务 D 已于 2026-11-05 完成运行（run `sentence-d-v1`）**
+> 实现与结果：[整句 pilot 实验报告](sentence-experiment-report.md)
+> 关联：[音素识别实验设计](experiment-design.md) · [最简实验报告](report-minimal.md) ·
+> [三模型详细对比](three-model-comparison.md)
 > 数据集：AISHELL-3（Apache-2.0）· OMPAL（CC BY 4.0）
 > 模型：阿里百炼 `qwen3.8-omni-flash`
 
@@ -411,7 +411,8 @@ N1 是诊断口径，报告“N0 vs N1”的差值，说明 sandhi 规则对指�
 
 ## 14. 附录 A：任务 D——ASR 文本条件下的对齐与评分（v0.2，未运行）
 
-> 本附录是 v0.2 新增；`sentence-v1` 只跑 A/B/C，不包含 D。D 需要新的 run（建议 `sentence-d-v1`）。
+> 本附录是 v0.2 新增；`sentence-v1` 只跑 A/B/C，不包含 D。D 已用独立 run `sentence-d-v1` 完成，
+> 结果见 [整句 pilot 报告 §6](sentence-experiment-report.md#6-任务-dasr-文本条件下的对齐与评分v02-附录-a)。
 > 目的：真实 ASR 可能自动纠错或误识；给定 ASR 文本后，Qwen 的逐字对齐、错误定位和整句评分会不会退化？
 
 ### A.1 RQ-D

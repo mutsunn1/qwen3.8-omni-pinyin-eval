@@ -244,6 +244,51 @@ def build_manifest(
     pricing = Pricing.from_config(cfg)
     tasks = sorted({plan.task for plan in plans})
     prompt_version = D_PROMPT_VERSION if tasks == ["D"] else PROMPT_VERSION
+    seed = cfg.seed()
+    d_provenance: dict[str, Any] | None = None
+    if tasks == ["D"]:
+        from .d_task import D_PREP_SEED
+
+        seed = int(cfg.get("sentence.d.seed", D_PREP_SEED))
+        prep_path = sentence_manifest_dir(cfg) / "d_prep_summary.json"
+        d_provenance = {
+            "d_prep_summary": {
+                "file": str(prep_path),
+                "sha256": _sha256_file(prep_path),
+            },
+            "injected_10": {
+                "file": str(sentence_manifest_dir(cfg) / "d_injected_10.jsonl"),
+                "sha256": _sha256_file(sentence_manifest_dir(cfg) / "d_injected_10.jsonl"),
+            },
+            "asr": {},
+        }
+        asr_path = cfg.repo_root / str(
+            cfg.get("sentence.d.asr_outputs", "data/sentence/d_asr/asr_outputs.jsonl")
+        )
+        asr_summary_path = cfg.repo_root / str(
+            cfg.get("sentence.d.asr_summary", "data/sentence/d_asr/d_asr_summary.json")
+        )
+        d_provenance["asr"] = {
+            "outputs_file": str(asr_path),
+            "outputs_sha256": _sha256_file(asr_path),
+            "summary_file": str(asr_summary_path),
+            "summary_sha256": _sha256_file(asr_summary_path),
+        }
+        if asr_summary_path.exists():
+            try:
+                asr_summary = json.loads(asr_summary_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:  # pragma: no cover - defensive
+                asr_summary = {}
+            d_provenance["asr"]["model_id"] = asr_summary.get("model_id")
+            d_provenance["asr"]["funasr_version"] = asr_summary.get("funasr_version")
+            d_provenance["asr"]["device"] = asr_summary.get("device")
+            d_provenance["asr"]["decode_params"] = asr_summary.get("decode_params")
+            d_provenance["asr"]["n_ok"] = asr_summary.get("n_ok")
+        d_provenance["injection"] = {
+            "seed": seed,
+            "ratio": cfg.get("sentence.d.inject_ratio", 0.10),
+            "mix": cfg.get("sentence.d.inject_mix"),
+        }
     return {
         "run_id": run_id,
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -256,7 +301,7 @@ def build_manifest(
         "prompt_fingerprints": prompt_fingerprints(),
         "config_path": str(cfg.source_path) if cfg.source_path else None,
         "config_sha256": cfg.config_sha256(),
-        "seed": cfg.seed(),
+        "seed": seed,
         "pricing": pricing.as_dict(),
         "budget_cny": budget_cny,
         "conditions": conditions(cfg),
@@ -268,6 +313,7 @@ def build_manifest(
             for key in ("seed", "created_at", "aishell3", "ompal", "deviations", "sources")
             if key in prep_summary
         },
+        "d_provenance": d_provenance,
         "git_commit": _git_commit(repo_root),
         "operator": str(cfg.get("project.operator", "")),
         "environment": {

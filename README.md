@@ -22,7 +22,8 @@ zero-shot 评测框架，回答四个问题：
 框架已完整实现 v3 设计并通过真实 API 验证；完成两档最小化实验、两个外部基线
 （SDHY P0-v2、讯飞 ISE）以及三模型对比；并完成**整句（utterance）pilot**：
 任务 A 整句拼音转写（AISHELL-3）、B 整句发音评测 / C 整句朗读评分（OMPAL），
-C1/C2 两个思考条件全量真实运行（run `sentence-v1`）。
+C1/C2 两个思考条件全量真实运行（run `sentence-v1`）；并按设计 v0.2 附录 A 完成
+**任务 D（ASR 文本条件下的逐字对齐与评分）**（run `sentence-d-v1`，5,274 次调用，¥6.31）。
 
 | 运行 | 数据 | 条件 | 调用 | 实际成本 | 关键结果 |
 |---|---|---:|---:|---:|---|
@@ -30,7 +31,8 @@ C1/C2 两个思考条件全量真实运行（run `sentence-v1`）。
 | **`mini128-v1`（128 档，主结果）** | **2,048 音频** | 4 | 79,680 | **¥16.78** | **initial 0.962 / final 0.949 / tone 0.912 / joint 0.838**；派生检测 **F1 0.922 / FPR 0.162** |
 | 检测 prompt 探针 | 512 音频 × 6 任务 × 3 变体 | 3 | 9,216 | ¥1.45 | 改 prompt 无法修复过度判不一致（FPR 0.76→0.77） |
 | **`sentence-v1`（整句 pilot）** | AISHELL-3 300 句 + OMPAL 1,758 条（+82 native 锚点） | 2（C1/C2） | **7,796** | **¥8.29** | A joint **0.883**（C2 0.917）、句级完全正确 0.323（C2 0.440）；B macro-F1 0.553/0.558/0.601；C Pearson 0.352/0.581/0.393；解析 99.99%，验收通过 |
-| 合计（Qwen） | — | — | **156,660** | **¥38.89 / ¥70（55.6%）** | 预算守卫未触发 |
+| **`sentence-d-v1`（任务 D）** | OMPAL 1,758 条 × 3 种文本源（gold/ASR/注入） | 1（C1） | **5,274** | **¥6.31** | 逐字对齐 F1 0.989/0.960/0.975；ASR 错字 recall 0.17 vs 注入错误 0.74；发音定位 macro-F1≈0.50（FNR 0.88）；评分 mean r 0.463/0.483/0.431；验收通过 |
+| 合计（Qwen） | — | — | **161,934** | **¥45.20 / ¥70（64.6%）** | 预算守卫未触发（整句总预算 ¥20 内用 ¥14.60） |
 
 **核心结论**
 
@@ -40,7 +42,12 @@ C1/C2 两个思考条件全量真实运行（run `sentence-v1`）。
 3. **噪声主要伤声母/联合**：−12 ~ −13.5pp；声调鲁棒。自由文本仅对“只输出韵母”的
    exp5 有害（ü 丢失，−7 ~ −25pp），JSON 应作为主格式。
 4. 主条件下模型能力：声母 **0.962**、韵母 **0.949**、声调 **0.912**、联合 **0.838**。
-5. **整句 pilot**（`sentence-v1`，¥8.29）：整句拼音转写可用（joint 0.883 / C2 0.917，
+5. **任务 D（ASR 文本条件，`sentence-d-v1`，¥6.31）**：给固定 ASR 文本后逐字对齐仍可用
+   （F1 0.96），但模型**几乎检测不到真实 ASR 错字**（text_error recall 0.17），
+   却能报出受控注入错误（recall 0.74）；发音错误定位本就接近“全判正确”
+   （macro-F1≈0.50、FNR≈0.88），ASR 文本噪声不是主因；整句评分相关性 oracle/ASR
+   无显著差异（mean r 0.463 vs 0.483），受控错误文本才显著略降（0.431）。
+6. **整句 pilot**（`sentence-v1`，¥8.29）：整句拼音转写可用（joint 0.883 / C2 0.917，
    按单音节类别加权后与单音节基本持平、声调略好）；**发音错误定位不可用**
    （B macro-F1 0.55–0.60、声调 FNR 0.79，模型偏向“都读对”）；朗读评分只能算中等相关
    （C Pearson 0.35 / 0.58 / 0.39）。**thinking on 在整句上反转**：A/B 显著更好、C 的
@@ -205,6 +212,23 @@ set -a && . ./.env && set +a
   **全部通过**；结果与解释边界见 [整句 pilot 报告](docs/sentence-experiment-report.md)。
 * 离线全链路（无 key）：`make sentence-mock`（7,796 次 mock 调用 → 评分 → 报告）。
 
+**任务 D（设计 v0.2 附录 A：ASR 文本条件下的对齐与评分，已完成）**
+
+```bash
+uv sync --extra asr                                         # 本地 ASR 依赖（funasr/torch）
+.venv/bin/python scripts/run_d_asr.py                       # 固定 FunASR Paraformer-zh 转写 1,758 条
+.venv/bin/python -m pinyin_eval.cli sentence d-prepare       # gold / ASR / inject-10 三种文本源
+.venv/bin/python -m pinyin_eval.cli sentence generate --tasks D --conditions C1 \
+    --run-id sentence-d-v1 --budget-cny 10                   # 5,274 次调用（实测 ¥6.31）
+.venv/bin/python -m pinyin_eval.cli sentence d-score  --run-id sentence-d-v1
+.venv/bin/python -m pinyin_eval.cli sentence d-report --run-id sentence-d-v1
+```
+
+* 同一批 1,758 条 learner 音频 × 3 种文本源；ASR 独立于 Qwen（FunASR Paraformer-zh CPU，
+  decode 参数/模型版本/原始文本全部归档）；扰动清单 `d_injected_10.jsonl`（10.89%，6:2:2）。
+* 验收：解析成功率 99.83–99.89%、输入字覆盖率 ≥99.45%、ASR 100% 归档、成本 ¥6.31 ≤¥10，
+  **全部通过**；结果见 [整句 pilot 报告 §6](docs/sentence-experiment-report.md)。
+
 ## 3. 实验与数据流
 
 ```
@@ -319,13 +343,16 @@ scripts/
   make_detection_probe_subset.py   # 检测探针固定子集
   sync_study_docs.py               # Obsidian → study/ 同步
   prepare_sentence_data.py         # 整句数据准备（AISHELL-3 抽样 + OMPAL 清洗 + 音频）
+  run_d_asr.py                     # 任务 D：本地 FunASR Paraformer-zh 转写（可复现/可续跑）
+  verify_sentence_run.py           # A/B/C 独立审计器
+  verify_sentence_d_run.py         # 任务 D 独立审计器
 src/pinyin_eval/
   config.py normalize.py records.py prompts.py parsing.py client.py runner.py
   scoring.py pricing.py derived_detection.py cli.py
   data/dataset.py data/minimal_pairs.py
   metrics.py stats.py report.py tasks.py
   sentence/                        # 整句 pilot：normalize/parsing/scoring/metrics/
-                                   # runner/report/cli/mock/prompts/records
+                                   # runner/report/cli/mock/prompts/records/d_task
 tests/                             # 离线测试（无网络 / 无 key；含 sentence 5 个测试文件）
 ```
 
@@ -393,6 +420,9 @@ GitHub Actions 每次 push 执行 `uv sync --locked → ruff → pytest`（无�
   **不能横向比较**；B 任务当前形态不可做自动纠音（macro-F1 0.55–0.60、FNR 0.79），
   需要任务重设计；C 的相关只有中等（0.35–0.58）且整体偏低约 0.45 分（native 锚点）。
   完整偏差清单见 [整句 pilot 报告 §2](docs/sentence-experiment-report.md)。
+* **任务 D 的解释边界**：ASR 文本质量较松（CER 20.0%、插入率 7.7%），D-asr 是真实噪声
+  条件；模型对真实 ASR 错字的 text_error recall 仅 0.17，报告不作因果归因；受控注入错误
+  不等于真实 ASR 错误分布；逐字 1–5 score 无人工 gold，仅描述；D 结论不替代 A/B/C。
 * 数据子集抽样导致的解释边界、逐对 CI（±7–14pp）见各结果文档。
 
 ## 10. 引用与许可

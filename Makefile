@@ -39,6 +39,7 @@ ci: lint test               ## CI 等价命令
 # ---------------------------------------------------------------------------
 SENTENCE_CONFIG ?= configs/sentence.yaml
 SENTENCE_RUN ?= sentence-v1
+SENTENCE_D_RUN ?= sentence-d-v1
 
 sentence-data:              ## 整句 pilot：AISHELL-3 抽样 + OMPAL 清洗 + 音频下载
 	$(UV) run pinyin-eval sentence --config $(SENTENCE_CONFIG) prepare
@@ -63,6 +64,23 @@ sentence-score:             ## 整句 pilot：解析 + 逐项评分
 
 sentence-report:            ## 整句 pilot：指标 / 表格 / SVG / 验收报告
 	$(UV) run pinyin-eval sentence --config $(SENTENCE_CONFIG) report --run-id $(SENTENCE_RUN)
+
+# 任务 D（design v0.2 附录 A）：ASR 文本条件下的对齐与评分
+sentence-d-asr:             ## 任务 D：本地 ASR（FunASR Paraformer-zh）转写 1,758 条 learner 音频
+	.venv/bin/python scripts/run_d_asr.py
+
+sentence-d-prepare:         ## 任务 D：构造三文本源 item 清单（gold / ASR / inject-10）
+	$(UV) run pinyin-eval sentence --config $(SENTENCE_CONFIG) d-prepare
+
+sentence-d-generate:        ## 任务 D：真实生成（C1 only，5,274 次调用，¥10 预算守卫）
+	$(UV) run pinyin-eval sentence --config $(SENTENCE_CONFIG) generate --tasks D --conditions C1 \
+		--run-id $(SENTENCE_D_RUN) --budget-cny 10
+
+sentence-d-score:           ## 任务 D：解析 + 逐项评分
+	$(UV) run pinyin-eval sentence --config $(SENTENCE_CONFIG) d-score --run-id $(SENTENCE_D_RUN)
+
+sentence-d-report:          ## 任务 D：报告 + 验收（design A.8）
+	$(UV) run pinyin-eval sentence --config $(SENTENCE_CONFIG) d-report --run-id $(SENTENCE_D_RUN)
 
 clean:                      ## 清理可再生产物与缓存（保留 data/raw 与 data/mapping）
 	rm -rf results/runs data/audio data/noisy data/manifests .pytest_cache .ruff_cache

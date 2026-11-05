@@ -13,7 +13,6 @@ from pathlib import Path
 
 from pinyin_eval.config import Config
 from pinyin_eval.sentence.d_task import (
-    D_PREP_SEED,
     TEXT_SOURCES,
     acceptance_d,
     build_d_items,
@@ -111,7 +110,9 @@ def _perfect_parsed(text: str | None = None) -> dict:
 def test_normalize_text():
     # t2s is part of the design's alignment normalisation -> traditional becomes simplified
     assert normalize_text(" 他們，都很忙。 ") == "他们都很忙"
-    assert normalize_text("ta1们 123") == "们"
+    # design A.2: only punctuation/whitespace are dropped -> Latin/digit tokens survive
+    assert normalize_text("ta1们 123") == "ta1们123"
+    assert normalize_text("我家有circle人") == "我家有circle人"
     assert normalize_text("") == ""
 
 
@@ -163,9 +164,9 @@ def test_injection_deterministic_and_rates():
     assert first == second
     chars, ops = first
     assert "".join(chars) != GOLD_TEXT
+    assert len(ops) == 1  # 5 chars -> max(1, round(0.5)) = 1 perturbed char
     kinds = [op["op"] for op in ops]
-    assert kinds.count("sub") >= 1
-    assert len(ops) >= 2
+    assert kinds[0] in {"sub", "del", "ins"}
     # different seed -> different perturbation
     other, _ = inject_errors(list(GOLD_TEXT), seed=8, toned_pool=toned,
                              toneless_pool=toneless, insertion_pool=insertion)
@@ -187,6 +188,25 @@ def test_parse_task_d_ok():
     assert len(result["alignment"]) == len(GOLD_TEXT)
     assert result["alignment"][0]["aligned"] is True
     assert result["scores"]["accuracy"] == 4.5
+
+
+def test_parse_task_d_error_types_english_and_chinese():
+    for raw, expected in (
+        ("none", "none"), ("null", "none"), (None, None), ("tone", "tone"),
+        ("consonant", "consonant"), ("vowel", "vowel"),
+        ("声调", "tone"), ("声母", "consonant"), ("韵母", "vowel"),
+        ("TONE", "tone"), ("tone error", "tone"), ("???", None),
+    ):
+        from pinyin_eval.sentence.d_task import _as_error_type
+
+        assert _as_error_type(raw) == expected, raw
+
+
+def test_parse_task_d_array_wrapper():
+    parsed = _perfect_parsed()
+    wrapped = json.dumps([{"alignment": parsed["alignment"], "scores": parsed["scores"]}],
+                         ensure_ascii=False)
+    assert parse_task_d(wrapped)["parse_status"] == "ok"
 
 
 def test_parse_task_d_failures():
@@ -226,6 +246,29 @@ def test_score_d_perfect():
     assert row["loc_vowel_tp"] == 1 and row["loc_vowel_fn"] == 0
     assert row["loc_consonant_tp"] == 0 and row["loc_consonant_tn"] == 5
     assert row["pred_accuracy"] == 4.5
+
+
+def test_score_d_text_error_handles_insertion():
+    # input text has an extra 啊: the insertion position is gold text_error=1
+    item = _d_item(text="他們都很忙啊")
+    alignment = []
+    for char in GOLD_TEXT:
+        alignment.append({"text": char, "aligned": True, "text_error": False,
+                          "error_type": "none", "score": 4.0})
+    alignment.append({"text": "啊", "aligned": False, "text_error": True,
+                      "error_type": None, "score": None})
+    parsed = {"parse_status": "ok", "alignment": alignment,
+              "scores": {"accuracy": 4.5, "fluency": 4.5, "prosody": 4.0}}
+    row = score_d(item, parsed, "C1")
+    assert row["terr_tp"] == 1  # insertion correctly flagged as text_error
+    assert row["terr_fn"] == 0 and row["terr_fp"] == 0
+    # model misses the insertion -> fn, not silence
+    quiet = {"parse_status": "ok",
+             "alignment": [{"text": ch, "aligned": True, "text_error": False,
+                            "error_type": "none", "score": 4.0} for ch in GOLD_TEXT],
+             "scores": {"accuracy": 4.5, "fluency": 4.5, "prosody": 4.0}}
+    row_quiet = score_d(item, quiet, "C1")
+    assert row_quiet["terr_fn"] >= 1
 
 
 def test_score_d_parse_failure():

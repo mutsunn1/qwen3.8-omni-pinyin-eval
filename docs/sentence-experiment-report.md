@@ -20,6 +20,15 @@ native 满分锚点上模型均分 4.55（人工 5.00）。与单音节实验相
 B 声调 F1 +10.8pp，均显著），但在 C 的分数校准上更差（MAE +0.29）。
 全部 **7,796 次调用解析成功率 99.99%、成本 ¥8.29（预算 ¥20）、验收全部通过**。
 
+设计 v0.2 新增的**任务 D（ASR 文本条件下的对齐与评分）**同样完成
+（run `sentence-d-v1`，5,274 次调用，¥6.31，验收通过）：给定固定 ASR 文本后，
+模型**逐字对齐**仍较好（F1：gold 0.989 / ASR 0.960 / 注入错误 0.975），
+但**对真实 ASR 错字的识别率很低**（text_error recall 仅 0.17；受控注入错误则为 0.74）；
+**发音错误定位没有被 ASR 文本显著拉低**（tone/consonant/vowel macro-F1 均约 0.50，
+Δ 接近 0）——因为该任务下模型本就极少判定发音错误（FNR≈0.88），文本噪声不是主因；
+**整句评分相关性与 oracle 文本无显著差异**（mean r 0.463 → 0.483，n.s.），
+而受控注入错误文本会让评分相关性略降（0.431，p<0.05）。
+
 ## 0. 实验目的与范围
 
 本 pilot 把已有的**单音节 TTS 拼音识别**扩展到**整句**，回答四个问题：
@@ -46,7 +55,8 @@ ground truth，**不能互相替代，也不能直接横向比较**；唯一可�
 | 调用量 | 计划 **7,796** 次 = (A 300 + B 1,758 + C 1,840) × 2 条件；C 的 1,840 = 1,758 learner + 82 native 锚点 |
 | 成本 | 预算上限 **¥20**；价格快照 输入 ¥0.8/M、输出 ¥2.7/M、音频 `ceil(秒)×7` token；按 API `usage` 实际记账 |
 | 统计 | 聚类 bootstrap 2000 次（A 按 speaker、B/C 按 learner），α=0.05；C1 vs C2 配对 bootstrap；A 句级完全正确率另做 McNemar；任务族内 Holm 校正；解析失败不进指标分母、单独报告 |
-| 可复现 | `run_manifest.json`（模型 id、prompt 版本/指纹、config sha256、数据清单 sha256、价格快照、seed、预算、git commit）；`generations.jsonl` 逐调用记录 usage/finish_reason/retry/延迟；run id `sentence-v1` |
+| 可复现 | `run_manifest.json`（模型 id、prompt 版本/指纹、config sha256、数据清单 sha256、价格快照、seed、预算、git commit）；`generations.jsonl` 逐调用记录 usage/finish_reason/retry/延迟；run id `sentence-v1`（A/B/C）与 `sentence-d-v1`（D） |
+| 任务 D（v0.2 附录 A） | OMPAL 1,758 条 learner × 3 种文本源（D-gold / D-asr / D-inject-10）× C1 = **5,274 次调用**；ASR 固定 FunASR Paraformer-zh（本地 CPU）；prompt `sentence-d-v1`；D 预算上限 ¥10（实测 ¥6.31） |
 
 ### 1.1 任务定义（与设计一致）
 
@@ -139,6 +149,8 @@ ground truth，**不能互相替代，也不能直接横向比较**；唯一可�
 | token | 按 7,616 次估算 | prompt 1,494,046 / completion 2,626,517（其中 reasoning 1,433,123） |
 | 解析成功率 | ≥95% | **99.99%**（7,795/7,796 ok；C2 有 1 条模型把评分任务误解为错误标注，属真实行为漂移） |
 
+- **任务 D 成本**（v0.2 附录 A）：计划 5,274 次，实测 **¥6.31**（D 预算上限 ¥10、总预算
+  ¥20 内；A/B/C ¥8.29 + D ¥6.31 = ¥14.60，占 ¥20 的 73%）。ASR 本地推理不计入 API 预算。
 - **单位成本**（同一口径）：按**调用**计价 A ¥0.00170、B ¥0.00135、C ¥0.00069；
   按 **item（两个条件合计）** A ¥0.00341、B ¥0.00269、C ¥0.00138。整句比单音节
   小实验的单次成本高（音频更长、A/B 输出更长、C2 reasoning 更多），但总量仍在个位数元。
@@ -266,7 +278,108 @@ reasoning 有帮助；而 C 的 1–5 分校准更依赖直接声学印象，rea
   其余可复现字段（模型 id、prompt 版本+指纹、config sha256、数据清单 sha256、价格快照、
   seed、预算、重试/usage/finish_reason）均已记录。
 
-## 6. 结论与解释边界
+## 6. 任务 D：ASR 文本条件下的对齐与评分（v0.2 附录 A）
+
+> run `sentence-d-v1` · prompt `sentence-d-v1` · 5,274 次调用 · ¥6.31 · C1 only ·
+> 自动报告：`results/sentence/sentence-d-v1/d_report.md` ·
+> 本任务与 A/B/C 使用**不同输入条件**（音频 + 给定文本），结论不能替代 A/B/C。
+
+### 6.1 文本源与 ASR 质量（描述，不用于筛选）
+
+| 文本源 | 构造 | 用途 |
+|---|---|---|
+| **D-gold** | OMPAL 原文（oracle） | 上界 |
+| **D-asr** | 固定 FunASR Paraformer-zh 转写（独立于 Qwen） | 真实 ASR 噪声 |
+| **D-inject-10** | gold + 10% 受控字符错误（6:2:2 sub/del/ins） | 主错误文本条件 |
+
+ASR 质量（n=1,758 / 19,598 gold 字，字符级 CER）：**CER micro 0.2003**、按句平均 0.2063、
+句级完全一致率 34.5%、中位 0.125 / p90 0.545；S/D/I = 2,361 / 55 / 1,509
+（12.05% / 0.28% / 7.70% of gold chars，插入多为学习者语气词/重复）；
+**ASR normalization rate = 66.49%**（OMPAL 标注为发音错误的 2,856 个字里 1,899 个 ASR 仍写成
+gold 字；分维 tone 0.681 / consonant 0.301 / vowel 0.323），逐 learner CER 中位 14.5% / p90 31.2% / max 45%。
+注入语料实际扰动 **10.89%**（2,134 / 19,598），mix sub 60.7% / del 19.1% / ins 20.2%，
+扰动清单归档于 `d_injected_10.jsonl`。
+
+### 6.2 逐字对齐（正类 = gold aligned）
+
+| 文本条件 | precision | recall | F1 | 95% CI | 输入字覆盖率 | gold-side 覆盖率 |
+|---|---:|---:|---|---:|---:|---:|
+| D-gold | 0.9984 | 0.9791 | **0.9886** | [0.9861, 0.9911] | 99.96% | 100.00% |
+| D-asr | 0.9377 | 0.9833 | **0.9599** | [0.9496, 0.9698] | 99.45% | 99.72% |
+| D-inject-10 | 0.9958 | 0.9544 | **0.9747** | [0.9726, 0.9769] | 99.86% | 97.95% |
+
+- 相对 oracle 的退化（Δ = D-gold − 条件；负值表示该条件更差）：D-asr **F1 −2.9pp**
+  [−3.9, −2.0pp]、D-inject −1.4pp；逐 utterance 对齐完全正确的 McNemar：
+  D-asr 仅 gold 正确 354 条 vs 仅 asr 正确 96 条（p<0.001），D-inject 499 vs 94（p<0.001）。
+- 结论（RQ-D1 前半）：**模型能较好地把给定文本对齐到音频**；真实 ASR 文本下
+  precision 降到 0.94（模型倾向于把 ASR 多出的字也判为“对齐”），但 recall 反而略升。
+
+### 6.3 文本错误检测（正类 = gold text_error，含 substitution 与 insertion）
+
+| 文本条件 | precision | recall | F1 | 95% CI |
+|---|---:|---:|---|---:|
+| D-gold（无错字，只有假阳性） | 0.0000 | — | 0.0000 | [0.0000, 0.0000] |
+| D-asr | 0.7966 | **0.1703** | 0.2807 | [0.2489, 0.3144] |
+| D-inject-10 | 0.7659 | **0.7357** | 0.7505 | [0.7251, 0.7774] |
+
+- 关键发现（RQ-D1 后半）：**模型对“受控随机错字”识别良好（recall 0.74），但对真实 ASR 错字
+  几乎不报（recall 0.17）**——precision 都约 0.77–0.80，说明模型一旦报错基本报对，
+  但在 ASR 文本下倾向于“信任输入文本”。真实 ASR 的错字以插入（语气词/重复）为主，
+  模型很可能把它们当作发音内容而非文本错误。
+- D-gold 的 precision 0 表示模型在 oracle 文本上仍会假报少量 text_error（假阳性）。
+
+### 6.4 发音错误定位（仅 text-correct + aligned 字；正类 = OMPAL 错误）
+
+| 文本条件 | tone macro-F1 | tone error-F1 | tone FNR | consonant macro-F1 | consonant error-F1 | vowel macro-F1 | vowel error-F1 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| D-gold | 0.5060 | 0.1274 | 0.8859 | 0.5235 | 0.0920 | 0.4964 | 0.0525 |
+| D-asr | 0.5183 | 0.1302 | 0.8749 | 0.5113 | 0.0508 | 0.5005 | 0.0371 |
+| D-inject-10 | 0.5094 | 0.1317 | 0.8836 | 0.5294 | 0.0971 | 0.5072 | 0.0664 |
+
+- 三个文本源下 macro-F1 都在 **0.50 附近、error-F1 仅 0.05–0.13、FNR 0.87–0.89**：
+  该 prompt 下模型几乎不判“发音错误”，macro-F1 基本由 “ok 类”贡献。
+- **RQ-D2 答案：ASR 文本错误没有显著降低发音错误定位**（Δ 均接近 0；
+  tone −0.012、consonant +0.012、vowel −0.004）；**主因不是文本噪声，而是模型在本任务下
+  本就极少报告发音错误**（与任务 B 的 B/C1 模式一致，且这里更严重）。
+- 零声母 consonant 单列：gold 0.5635 / asr 0.4932 / inject 0.5562（样本小，仅描述）。
+
+### 6.5 整句评分相关性（目标 = OMPAL 3 位评分者均值）
+
+| 文本条件 | mean Pearson | 95% CI | mean Spearman | mean MAE | mean RMSE |
+|---|---:|---|---:|---:|---:|
+| D-gold | **0.4627** | [0.3790, 0.5325] | 0.4305 | 0.5011 | 0.6404 |
+| D-asr | **0.4830** | [0.3963, 0.5530] | 0.4614 | 0.4892 | 0.6204 |
+| D-inject-10 | **0.4309** | [0.3468, 0.5036] | 0.4132 | 0.5520 | 0.6903 |
+
+分维（accuracy / fluency / prosody）：gold r 0.331 / 0.534 / 0.391；asr 0.393 / 0.512 / 0.411；
+inject 0.291 / 0.517 / 0.351。与任务 C 同量级（C C1 三维 r 0.352/0.581/0.393）。
+
+- **RQ-D3 答案**：真实 ASR 文本 **没有**显著降低评分相关性（Δ mean r = −0.020
+  [−0.055, 0.020]，n.s.；MAE Δ n.s.）；受控注入错误文本让 mean r 显著下降
+  （Δ = +0.032 [0.0035, 0.0628]）且 MAE 变差（Δ = −0.051 [−0.075, −0.026]）。
+
+### 6.6 综合：RQ-D4（真实 ASR vs 受控错误文本的退化方式）
+
+| 维度 | 真实 ASR（D-asr） | 受控注入（D-inject-10） |
+|---|---|---|
+| 逐字对齐 F1 | −2.9pp（显著） | −1.4pp（显著） |
+| text_error 检测 | recall 0.17（几乎不报） | recall 0.74（能报） |
+| 发音定位 macro-F1 | 无显著变化 | 无显著变化 |
+| 整句评分 mean r | 无显著变化 | −3.2pp（显著） |
+
+两种“错误文本”造成的退化**模式不同**：真实 ASR 文本主要伤害逐字对齐、
+且模型不把它当作文本错误，但不影响评分；受控随机错字能被模型识别为文本错误，
+却轻微拉低评分相关性。**不能把注入错误的结论直接外推到真实 ASR**（设计 A.2 的要求）。
+
+### 6.7 成本与验收（设计 A.8）
+
+- 5,274 次调用（另含重试记录 8 条），实际 **¥6.31**（D 预算上限 ¥10），
+  A/B/C ¥8.29 + D ¥6.31 = **¥14.60 / ¥20**。
+- 验收：解析成功率 D-gold 99.89% / D-asr 99.83% / D-inject 99.83%（≥95%）、
+  输入字覆盖率 99.96% / 99.45% / 99.86%（≥95%）、ASR 文本 100% 归档（sha256 记录）、
+  成本 ≤¥10 → **全部通过**。8 条空回复按解析失败单列，不进指标分母。
+
+## 7. 结论与解释边界
 
 **能否稳定测**：能。7,796 次真实调用解析成功率 99.99%、对齐覆盖率 ≥99.8%、
 成本 ¥8.29、验收全部通过；离线 mock（7,796 次）+ 5 个测试文件的回归测试保证可复现。
@@ -285,6 +398,11 @@ reasoning 有帮助；而 C 的 1–5 分校准更依赖直接声学印象，rea
    MAE 更差。单音节“thinking 有害”的结论不能外推到整句。
 5. **RQ-Context**：加权后整句与单音节在声母/韵母上基本持平、声调略好（+4.3pp），
    未观察到整句上下文导致的系统性退化；但语料/域不同，不做因果结论。
+6. **任务 D（ASR 文本条件）**：给定 ASR 文本后逐字对齐仍可用（F1 0.96），但模型
+   **几乎检测不到真实 ASR 错字**（text_error recall 0.17）却能把受控注入错误报出来
+   （0.74）；发音错误定位本身已接近“全判正确”（macro-F1≈0.50、FNR≈0.88），
+   ASR 文本噪声不是主因；整句评分相关性在 oracle/ASR 文本之间无显著差异
+   （mean r 0.463 vs 0.483），受控注入错误文本才显著略降（0.431）。
 
 **解释边界**（同设计 §11）：AISHELL-3 是朗读语料、train/test speaker 重叠（零样本评估
 抽样，不声称 unseen speaker）；OMPAL 只有 3 位评分者、法语 L1 子集、无 consent 声明，
@@ -297,7 +415,7 @@ C 的 Pearson CI 约 ±0.1；若要把 A 句级完全正确率的分辨率压到
 ±0.05，建议 A 扩到 1,000+ 句、B/C 保持全量或扩到更多 learner；B 需要任务重设计；
 C2 建议固定 reasoning token 预算后复测；AISHELL-3 test 划分的拼音标注需另找官方来源。
 
-## 7. 复现步骤
+## 8. 复现步骤
 
 ```bash
 # 0) 环境（`.env` 中填 DASHSCOPE_API_KEY / DASHSCOPE_BASE_URL）
@@ -310,12 +428,25 @@ C2 建议固定 reasoning token 预算后复测；AISHELL-3 test 划分的拼音
 .venv/bin/python -m pinyin_eval.cli sentence report --run-id sentence-v1
 ```
 
-离线全链路（无 API key）：`make sentence-mock`（7,796 次 mock 调用 + 评分 + 报告）。
+任务 D（设计 v0.2 附录 A；需本地 ASR，`uv sync --extra asr`）：
+
+```bash
+.venv/bin/python scripts/run_d_asr.py            # 固定 FunASR Paraformer-zh 转写（1,758 条，可续跑）
+.venv/bin/python -m pinyin_eval.cli sentence d-prepare          # 三文本源 item（5,274）
+.venv/bin/python -m pinyin_eval.cli sentence generate --tasks D --conditions C1 \
+    --run-id sentence-d-v1 --budget-cny 10                       # 5,274 次调用（实测 ¥6.31）
+.venv/bin/python -m pinyin_eval.cli sentence d-score  --run-id sentence-d-v1
+.venv/bin/python -m pinyin_eval.cli sentence cost     --run-id sentence-d-v1
+.venv/bin/python -m pinyin_eval.cli sentence d-report --run-id sentence-d-v1
+```
+
+离线全链路（无 API key）：`make sentence-mock`（7,796 次 mock 调用 + 评分 + 报告）；
+任务 D 的离线链路见 `tests/test_sentence_d_task.py`（mock E2E）。
 
 代码版本：整句实现提交为 `<待回填>`（实验运行时仓库 HEAD 为 `9ad0850`，不含 sentence 代码；
 复现请 checkout 实现提交并 `uv sync --locked`）。
 
-## 8. 产物清单
+## 9. 产物清单
 
 | 产物 | 路径 |
 |---|---|
@@ -326,5 +457,8 @@ C2 建议固定 reasoning token 预算后复测；AISHELL-3 test 划分的拼音
 | 逐 speaker/learner | `per_speaker_a.csv`、`per_learner_b.csv`、`per_learner_c.csv` |
 | 单音节对照明细 | `single_syllable_categories.csv` |
 | 独立审计 | `results/sentence/sentence-v1/verification.md` |
-| 代码 | `src/pinyin_eval/sentence/`（normalize/parsing/scoring/metrics/runner/report/cli/mock）、`scripts/prepare_sentence_data.py`、`scripts/verify_sentence_run.py` |
-| 测试 | `tests/test_sentence_{core,scoring,metrics,report,data_prep}.py`、`tests/test_verify_sentence_run.py`（432 项全部通过） |
+| 任务 D 运行 | `results/sentence/sentence-d-v1/{run_manifest.json,generations.jsonl,usage.csv,cost_summary.json,d_prep_summary.json}` |
+| 任务 D 评分/报告 | `results/sentence/sentence-d-v1/{rows_d.parquet,d_metrics.csv,d_comparisons.csv,d_per_learner.csv,d_acceptance.json,d_report_summary.json,d_report.md}` |
+| 任务 D 数据 | `data/sentence/manifests/{d_items.jsonl,d_injected_10.jsonl,d_prep_summary.json}`、`data/sentence/d_asr/{asr_outputs.jsonl,d_asr_summary.json,README.md}` |
+| 代码 | `src/pinyin_eval/sentence/`（normalize/parsing/scoring/metrics/runner/report/cli/mock/d_task）、`scripts/prepare_sentence_data.py`、`scripts/run_d_asr.py`、`scripts/verify_sentence_run.py`、`scripts/verify_sentence_d_run.py` |
+| 测试 | `tests/test_sentence_{core,scoring,metrics,report,data_prep,d_task}.py`、`tests/test_d_asr.py`、`tests/test_verify_sentence_run.py`、`tests/test_verify_sentence_d_run.py`（全绿） |

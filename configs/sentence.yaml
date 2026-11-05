@@ -36,11 +36,11 @@ sentence:
     C1:
       thinking: false
       max_tokens: 256
-      max_tokens_by_task: {A: 1536, B: 768, D: 768}
+      max_tokens_by_task: {A: 1536, B: 768, D: 1536}
     C2:
       thinking: true
       max_tokens: 1024
-      max_tokens_by_task: {A: 1536, B: 1280, D: 768}
+      max_tokens_by_task: {A: 1536, B: 1280, D: 1536}
   concurrency: 48
   qps: null
   # design §10.1 hard budget (CNY); runner stops scheduling new calls at the cap
@@ -52,6 +52,7 @@ sentence:
       B: 320
       C: 30
       C2: 800
+      D: 300
   stats:
     n_boot: 2000
     alpha: 0.05
