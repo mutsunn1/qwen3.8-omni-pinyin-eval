@@ -121,6 +121,19 @@
 * 未受影响：HuggingFace/GitHub 在本机被系统代理拦截（Clash 主节点故障），
   但数据与任务清单已在本地，实验不受影响；需要访问 GitHub 时临时关闭代理。
 
+### 8.8 SDHY 口径修正：原生 target-aware 补跑（2026-11-06）
+
+* 之前 `baseline-sdhy` 的 0.600/0.746/0.699/0.299 是**自由识别适配**口径，不是
+  SDHY 产品原生的“已知 target + 强制对齐”模式；不能用它评价 XLSR/GOP 或 SDHY。
+* 补跑 `scripts/eval_sdhy_native.py`：4,096 同批检测 claims（2,048 音频 × 一致/不一致），
+  原生链路（X2 forced alignment + M1.6 centroid margins + F0 tone rules +
+  RuleCalibrator），CPU fp32，124.5s。
+* 结果：verdict 规则 Error-F1 **0.737** / FPR **0.213** / Acc 0.747（弃权率 73.6%）；
+  margin 阈值 AUC **0.797**；分维定位 initial 74.2% / final 71.2% / tone 36.8%。
+  同 claims 上 Qwen 直接判定 0.720/0.771、Qwen 派生 **0.922/0.162**、ISE 0.914/0.133
+  （512 子集）。原生模式在给定目标检测上略优于 Qwen 直接判定，但明显弱于 Qwen 派生检测。
+* 文档：[docs/results-sdhy-native.md](results-sdhy-native.md)；相关文档已加口径修正。
+
 ### 8.7 第二个外部基线：讯飞 ISE（2026-10-30）
 
 * 接口：`wss://ise-api.xfyun.cn/v2/open-ise`（HMAC-SHA256 鉴权），凭证只入 `.env`。

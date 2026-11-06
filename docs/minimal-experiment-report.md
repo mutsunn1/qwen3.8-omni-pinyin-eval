@@ -76,9 +76,11 @@ derived_consistent = pred_initial == claim_initial
 | 检测（模型直接判定）Error-F1 / FPR | 0.720 / 0.764 | 0.720 / 0.771 |
 | **检测（派生检测）Error-F1 / FPR** | **0.912 / 0.184** | **0.922 / 0.162** |
 
-> 同子集外部声学基线（SDHY P0-v2，适配自由识别，2,048 音频）：
-> initial 0.600 / final 0.746 / tone 0.699 / joint 0.299；Qwen 对应
-> 0.962 / 0.949 / 0.912 / 0.838。逐弱对对比见 `docs/baseline-sdhy.md` §5。
+> 同子集外部声学基线（SDHY P0-v2，2,048 音频）：**自由识别适配** initial 0.600 /
+> final 0.746 / tone 0.699 / joint 0.299（**非其产品原生能力**）；**原生 target-aware**
+> 模式检测 F1 0.737 / FPR 0.213（Qwen 直接判定 0.720 / 0.771，Qwen 派生 0.922 / 0.162）。
+> Qwen 对应识别 0.962 / 0.949 / 0.912 / 0.838。详见 `docs/baseline-sdhy.md` §5/§6 与
+> `docs/results-sdhy-native.md`。
 
 * 实验四（声母最小对）子实验：0.969 / 0.964 / 0.977（free / 正确信息 / 错误信息）；
 * 实验五（韵母）：0.955 / 0.986 / 0.915；

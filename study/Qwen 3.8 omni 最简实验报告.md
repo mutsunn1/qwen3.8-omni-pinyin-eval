@@ -1,10 +1,8 @@
 # Qwen3.8-Omni 普通话音素识别最小化实验报告
 
 > 2026-10-30 · 模型 `qwen3.8-omni-flash` · 数据 `HaitongSUN/prosodic-abx`
-> 设计：[最小化实验设计](Qwen%203.8%20omni%20%E6%9C%80%E5%B0%8F%E5%8C%96%E5%AE%9E%E9%AA%8C%E8%AE%BE%E8%AE%A1.md) · 两档运行：`mini3-v1`（96 target / 1,536 音频）、`mini128-v1`（128 target / 2,048 音频）
-> 详细版与基线见项目仓库：`docs/minimal-experiment-report.md`、`docs/baseline-sdhy.md`、`docs/baseline-ise.md`
-> 讯飞 ISE 完整细节（鉴权/协议/适配/全量结果）见 [讯飞 ISE 基线详情](Qwen%203.8%20omni%20%E8%AE%AF%E9%A3%9E%20ISE%20%E5%9F%BA%E7%BA%BF%E8%AF%A6%E6%83%85.md)
-> 三模型弱项对比（Qwen / SDHY / ISE）见 [三模型弱项对比](Qwen%203.8%20omni%20%E4%B8%89%E6%A8%A1%E5%9E%8B%E5%BC%B1%E9%A1%B9%E5%AF%B9%E6%AF%94.md)
+> 设计：[最小化实验设计](../docs/experiment-design-minimal.md) · 两档运行：`mini3-v1`（96 target / 1,536 音频）、`mini128-v1`（128 target / 2,048 音频）
+> 详细版：[minimal-experiment-report.md](../docs/minimal-experiment-report.md) · 基线：[SDHY](../docs/baseline-sdhy.md)、[讯飞 ISE](../docs/baseline-ise.md)
 
 ## 一句话结论
 
@@ -46,31 +44,33 @@
 
 ## 3. 消融（C2/C3/C4 vs C1，配对检验）
 
-| 对比                | 代表指标              |                差值 [95% CI] |
-| ----------------- | ----------------- | -------------------------: |
-| think on vs off   | exp1 tone         | **−20.0pp** [−21.8, −18.2] |
-|                   | exp3 joint        | **−19.1pp** [−21.0, −17.1] |
-|                   | exp6 错误信息 tone    | **−43.8pp** [−52.8, −35.5] |
-| SNR20 噪声 vs clean | exp3 initial      | **−13.5pp** [−15.1, −11.9] |
-|                   | exp3 joint        | **−12.5pp** [−14.5, −10.5] |
-|                   | exp1/2 tone       |                      0（ns） |
-| 自由文本 vs JSON      | exp3 initial/tone |                     ≈0（ns） |
-|                   | exp5 free final   |                 **−7.4pp** |
-|                   | exp5 错误信息 final   |          **−25.0pp**（ü 丢失） |
+| 对比 | 代表指标 | 差值 [95% CI] |
+|---|---|---:|
+| think on vs off | exp1 tone | **−20.0pp** [−21.8, −18.2] |
+| | exp3 joint | **−19.1pp** [−21.0, −17.1] |
+| | exp6 错误信息 tone | **−43.8pp** [−52.8, −35.5] |
+| SNR20 噪声 vs clean | exp3 initial | **−13.5pp** [−15.1, −11.9] |
+| | exp3 joint | **−12.5pp** [−14.5, −10.5] |
+| | exp1/2 tone | 0（ns） |
+| 自由文本 vs JSON | exp3 initial/tone | ≈0（ns） |
+| | exp5 free final | **−7.4pp** |
+| | exp5 错误信息 final | **−25.0pp**（ü 丢失） |
 
 ## 4. 外部基线（同一批 2,048 音频）
 
-| 指标                |  Qwen3.8-Omni | SDHY P0-v2（开源声学） | 讯飞 ISE（商用，候选打分） |
-| ----------------- | ------------: | ---------------: | --------------: |
-| Initial           |     **0.962** |            0.600 |               — |
-| Final             |     **0.949** |            0.746 |               — |
-| Tone              |         0.912 |            0.699 |       **0.922** |
-| Joint             |     **0.838** |            0.299 |               — |
-| 检测 Error-F1 / FPR | 0.922 / 0.162 |    0.731 / 0.701 |   0.914 / 0.133 |
-| 7 类最小对（判别）        |   0.906–0.992 |      0.422–0.917 |     0.906–1.000 |
+| 指标 | Qwen3.8-Omni | SDHY P0-v2（开源声学） | 讯飞 ISE（商用，候选打分） |
+|---|---:|---:|---:|
+| Initial | **0.962** | 0.600 | — |
+| Final | **0.949** | 0.746 | — |
+| Tone | 0.912 | 0.699 | **0.922** |
+| Joint | **0.838** | 0.299 | — |
+| 检测 Error-F1 / FPR（同 4,096 claims） | 0.922 / 0.162（派生） | 自由适配 0.731 / 0.701；**原生 0.737 / 0.213** | 0.914 / 0.133（512 子集） |
+| 7 类最小对（判别） | 0.906–0.992 | 0.422–0.917 | 0.906–1.000 |
 
 > 口径提醒：ISE 是“2–4 候选强制选择”，比自由识别容易，只作相对比较；
-> SDHY 是自由识别适配口径，可直接对比。ISE 在送气、n/l、ian/üan、声调最小对、
+> SDHY 的识别列是**自由识别适配**（非其产品原生能力）；原生 target-aware 模式
+> 检测 F1 0.737/FPR 0.213（见 [results-sdhy-native.md](Qwen%203.8%20omni%20SDHY%20%E5%8E%9F%E7%94%9F%E6%A8%A1%E5%BC%8F%E8%A1%A5%E8%B7%91.md)）。
+> ISE 在送气、n/l、ian/üan、声调最小对、
 > en/eng、o/uo、2/3 声上强于 Qwen；Qwen 在 in/ing、üe/ie、ei/ie、d/t、n/l、前后鼻上更稳。
 
 ## 5. 成本
@@ -91,7 +91,8 @@
 3. **数据增强/专项**：噪声主要伤声母与联合识别（−12 ~ −13.5pp），声调鲁棒；
    文本输出只对 exp5（单韵母输出）有害（ü 丢失），JSON 模式应作为主格式。
 4. **仍需补强**：Qwen 剩余弱项为 **m/n（0.858）、o/uo（0.804）、2/3 声（0.825）、
-   en/eng（0.883，低于 SDHY 基线 0.938）**；ISE 弱项为 in/ing、üe/ie 及 B 声线声调。
+   en/eng（0.883，低于 SDHY **自由识别适配**的 0.938；SDHY 原生模式 tone 不能输出
+   free 标签，不作此比较）**；ISE 弱项为 in/ing、üe/ie 及 B 声线声调。
 5. 剩余 ¥39.4 API 预算与 4,157 次 ISE 交互，可做上述弱项专项或扩档（128→更大样本）。
 
 ## 7. 复现

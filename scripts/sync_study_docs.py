@@ -1,8 +1,9 @@
 """Sync the Obsidian ``study/`` notes into the repository's ``study/`` folder.
 
 The Obsidian vault is the authoring surface; GitHub is the shared readable copy.
-This script copies the five experiment notes verbatim (except link rewrites) and
-regenerates ``study/README.md`` as an index.
+This script copies the experiment notes verbatim (except link rewrites) and
+regenerates ``study/README.md`` as an index.  Obsidian moved the design notes
+into ``实验设计/`` on 2026-11-04; ``VAULT_PATHS`` tracks that layout.
 
 Link rewrites:
 
@@ -62,6 +63,17 @@ DOCS: dict[str, tuple[str, str]] = {
         "docs/sentence-experiment-report.md",
         "整句 pilot 结果（run sentence-v1，7,796 次调用 / ¥8.29，验收通过）",
     ),
+    "Qwen 3.8 omni SDHY 原生模式补跑.md": (
+        "docs/results-sdhy-native.md",
+        "SDHY P0-v2 原生 target-aware 补跑（口径修正：0.299 是自由识别适配，不是产品原生能力）",
+    ),
+}
+
+#: vault-relative source paths (design notes moved under 实验设计/ on 2026-11-04)
+VAULT_PATHS: dict[str, str] = {
+    "Qwen 3.8 omni 音素识别实验设计.md": "实验设计/Qwen 3.8 omni 音素识别实验设计.md",
+    "Qwen 3.8 omni 最小化实验设计.md": "实验设计/Qwen 3.8 omni 最小化实验设计.md",
+    "Qwen 3.8 omni 整句拼音评测实验设计.md": "实验设计/Qwen 3.8 omni 整句拼音评测实验设计.md",
 }
 
 #: short label used when rewriting a wiki link
@@ -74,6 +86,7 @@ SHORT = {
     "Qwen 3.8 omni 三模型详细对比": "三模型详细对比",
     "Qwen 3.8 omni 整句拼音评测实验设计": "整句评测实验设计",
     "Qwen 3.8 omni 整句拼音评测实验报告": "整句评测实验报告",
+    "Qwen 3.8 omni SDHY 原生模式补跑": "SDHY 原生模式补跑",
 }
 
 #: relative links inside the vault notes that must point back into docs/
@@ -86,6 +99,7 @@ LINK_FIXES = {
     "(baseline-ise-detail.md)": "(../docs/baseline-ise-detail.md)",
     "(sentence-experiment-design.md)": "(Qwen%203.8%20omni%20%E6%95%B4%E5%8F%A5%E6%8B%BC%E9%9F%B3%E8%AF%84%E6%B5%8B%E5%AE%9E%E9%AA%8C%E8%AE%BE%E8%AE%A1.md)",
     "(sentence-experiment-report.md)": "(Qwen%203.8%20omni%20%E6%95%B4%E5%8F%A5%E6%8B%BC%E9%9F%B3%E8%AF%84%E6%B5%8B%E5%AE%9E%E9%AA%8C%E6%8A%A5%E5%91%8A.md)",
+    "(results-sdhy-native.md)": "(Qwen%203.8%20omni%20SDHY%20%E5%8E%9F%E7%94%9F%E6%A8%A1%E5%BC%8F%E8%A1%A5%E8%B7%91.md)",
 }
 
 
@@ -134,12 +148,12 @@ def main() -> int:
     vault = Path(args.vault_dir).expanduser()
     dest = ROOT / args.dest
     dest.mkdir(parents=True, exist_ok=True)
-    missing = [name for name in DOCS if not (vault / name).is_file()]
+    missing = [name for name in DOCS if not (vault / VAULT_PATHS.get(name, name)).is_file()]
     if missing:
         raise SystemExit(f"missing vault documents: {missing}")
     written = []
     for name in DOCS:
-        text = (vault / name).read_text(encoding="utf-8")
+        text = (vault / VAULT_PATHS.get(name, name)).read_text(encoding="utf-8")
         (dest / name).write_text(rewrite(text), encoding="utf-8")
         written.append(name)
     (dest / "README.md").write_text(index(written), encoding="utf-8")

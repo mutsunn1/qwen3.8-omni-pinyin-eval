@@ -3,7 +3,17 @@
 > 目的：把 `CHAO-AI-Lab/SDHY_Test_System` 的 `evaluater_speaking_0.1` 发音评测模型
 > 拉下来，作为 Qwen3.8-Omni 实验的**声学基线**，在同一批 2,048 条音频上与
 > `mini128-v1` 对比。
-> 日期：2026-10-30 · 评测脚本：[scripts/eval_sdhy_baseline.py](../scripts/eval_sdhy_baseline.py)
+> 日期：2026-10-30（自由识别适配）；**2026-11-06 补跑原生 target-aware 模式**
+> 评测脚本：[scripts/eval_sdhy_baseline.py](../scripts/eval_sdhy_baseline.py)（适配）·
+> [scripts/eval_sdhy_native.py](../scripts/eval_sdhy_native.py)（原生）
+> · 原生结果详见 [results-sdhy-native.md](results-sdhy-native.md)
+
+> **口径修正（重要）**：本文 §3–§5 的 0.600 / 0.746 / 0.699 / **0.299** 是把 SDHY
+> 的编码器/对齐头当作**自由识别器**的适配口径，**不是**其产品原生的
+> “已知 target + 强制对齐”模式。原生模式补跑（2026-11-06）在 4,096 条同批检测 claim 上
+> 得到给定目标一致性判定 **F1 0.737 / FPR 0.213**（Qwen 直接判定为 0.720 / 0.771），
+> 详见 [results-sdhy-native.md](results-sdhy-native.md) 与本文 §6。
+> **不能**用自由识别适配的 0.299 判断 XLSR/GOP 或 SDHY 模型能力。
 
 ## 1. 模型来源与下载校验
 
@@ -151,7 +161,31 @@ third_party/.venv-baseline/                        # torch/transformers 基线�
 * 结论：Qwen 在基线所有弱项上都有大幅提升，但并非全面碾压——m/n、o/uo、2/3 声、
   en/eng 是下一步 prompt/数据层面值得单独补强的四类。
 
-## 6. 复现
+## 6. 原生 target-aware 模式（2026-11-06 补跑）
+
+原生链路：`audio + target(initial,final,tone) → 冻结 XLSR 证据 → X2 强制对齐 →
+M1.6 质心 margin → F0 声调规则 → RuleCalibrator（GOOD/NEEDS_WORK/UNCERTAIN）`。
+在 **4,096 条同批检测 claim**（2,048 音频 × 1 一致 + 1 不一致）上评估：
+
+| 方法（同一 claim 集合） | Error-F1 | Precision | Recall | FPR | FNR | Acc |
+|---|---:|---:|---:|---:|---:|---:|
+| Qwen 直接判一致（given target） | 0.720 | 0.564 | 0.996 | 0.771 | 0.004 | 0.612 |
+| **SDHY 原生 verdict 规则** | **0.737** | **0.769** | 0.708 | **0.213** | 0.292 | **0.747** |
+| SDHY 原生 margin 阈值（eval half） | 0.739 | 0.720 | 0.759 | 0.289 | 0.241 | 0.735 |
+| SDHY 自由识别适配（旧口径，参考） | 0.731 | — | — | 0.701 | — | — |
+| Qwen 派生检测（自由识别+比较） | **0.922** | 0.860 | 0.993 | **0.162** | 0.007 | **0.916** |
+| 讯飞 ISE（512 claim 子集） | 0.914 | — | — | 0.133 | 0.047 | 0.910 |
+
+* 原生 AUC（连续 margin 分数）= **0.797**；cost = 0 额外 API，CPU 4,096 claims **124.5s**；
+* verdict 规则弃权率 **73.6%**（保守）；只看有明确结论的 1,081 条：F1 **0.833**、
+  precision 0.734、recall 0.964、FPR 0.380、FNR 0.036；
+* 分维定位（pos claim 的目标维度 NEEDS_WORK）：initial **74.2%**、final **71.2%**、
+  tone **36.8%**；正确目标上的误报：initial 6.6%、final 8.8%、tone 8.3%；
+* 结论：原生模式是**可用的 target-aware 基线**（实际略优于 Qwen 直接判定，且误报低得多），
+  但保守、弃权多、tone 弱；与 Qwen 的**自由识别派生检测**（0.922）不是同一任务模式。
+  详见 [results-sdhy-native.md](results-sdhy-native.md)。
+
+## 7. 复现
 
 ```bash
 # 1) 克隆（需要 gh 权限）
@@ -177,12 +211,14 @@ uv pip install --python third_party/.venv-baseline/bin/python \
 PYTHONPATH=src third_party/.venv-baseline/bin/python scripts/eval_sdhy_baseline.py
 ```
 
-## 7. 局限
+## 8. 局限
 
-* 基线是**已知 target 的评测系统**，自由识别是适配层（对齐头 + 规则声调），
-  不是其官方能力；不能据此说“SDHY 系统差 36 个点”，只能说“这套声学编码器/头在
-  无 target 自由识别上弱于 Qwen”。
+* **自由识别适配不是产品原生能力**：0.299 不能代表 SDHY/XLSR/GOP 水平；原生
+  target-aware 模式见 §6（F1 0.737 / FPR 0.213，Qwen 直接判定 0.720 / 0.771）。
+  两者都不同于 Qwen 的自由识别派生检测（0.922）。
 * CPU fp32 与官方 cuda-fp16 不是同一计算模式；
 * 声调规则分类器只有 0.672 校准准确率，且三声/一声混淆明显；
-* 未使用他们的 centroid/OMPAL/VOT 规则（需要已知 target 的强制对齐区间），
-  这条链路只适合做“给定 target 的一致性判定”基线，与本文自由识别任务不同口径。
+* 原生模式已使用 centroid/X2 链路（未接 MFA 真边界与 VOT 解释层）；tone 仍是
+  保守 F0 规则，弃权率高。
+* CPU fp32 vs 官方 cuda-fp16、2,048 子集 vs 全量 6,160、保守 RuleCalibrator，
+  都会影响原生模式的绝对数值。

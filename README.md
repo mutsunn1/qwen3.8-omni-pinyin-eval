@@ -58,11 +58,15 @@ C1/C2 两个思考条件全量真实运行（run `sentence-v1`）；并按设计
 | 模型 | Initial | Final | Tone | Joint | 检测 F1 / FPR |
 |---|---:|---:|---:|---:|---:|
 | **Qwen3.8-Omni（C1）** | **0.962** | **0.949** | 0.912 | **0.838** | **0.922 / 0.162** |
-| SDHY P0-v2（开源，适配自由识别） | 0.600 | 0.746 | 0.699 | 0.299 | 0.731 / 0.701 |
+| SDHY P0-v2（自由识别适配，非原生） | 0.600 | 0.746 | 0.699 | 0.299 | 0.731 / 0.701 |
+| **SDHY P0-v2（原生 target-aware）** | 不适用 | 不适用 | 不适用 | 不适用 | **0.737 / 0.213** |
 | 讯飞 ISE（商用，候选打分） | — | — | **0.922** | — | 0.914 / 0.133 |
 
-* SDHY：冻结 XLSR-zh + M1/X2 头，CPU 中位 47.7ms/条；详见
-  [docs/baseline-sdhy.md](docs/baseline-sdhy.md)。
+* SDHY：冻结 XLSR-zh + M1/X2 头，CPU 中位 47.7ms/条。**0.600/0.746/0.699/0.299 只是
+  自由识别适配口径，不是其产品原生能力**；原生 target-aware 模式在 4,096 claims 上
+  检测 F1 0.737 / FPR 0.213（Qwen 直接判定 0.720/0.771，Qwen 派生 0.922/0.162）。
+  详见 [docs/baseline-sdhy.md](docs/baseline-sdhy.md) 与
+  [results-sdhy-native.md](docs/results-sdhy-native.md)。
 * 讯飞 ISE：参考打分 API（静音填充 + 拼音标注卷 + 候选打分）；tone 0.922、
   7 类最小对平均 0.962、检测 AUC 0.909；已用 **5,843 / 10,000** 次交互；
   详见 [docs/baseline-ise-detail.md](docs/baseline-ise-detail.md)。
@@ -326,6 +330,7 @@ docs/minimal-experiment-report.md  # 两档详细汇总报告
 docs/results-minimal-v1.md         # mini3-v1 结果
 docs/results-minimal-128.md        # mini128-v1 结果
 docs/baseline-sdhy.md              # SDHY 基线（下载/适配/结果）
+docs/results-sdhy-native.md        # SDHY 原生 target-aware 模式补跑（口径修正）
 docs/baseline-ise.md               # 讯飞 ISE 基线（简版）
 docs/baseline-ise-detail.md        # 讯飞 ISE 详细（接口/协议/账目/性价比）
 docs/model-weakness-comparison.md  # 三模型弱项对比
@@ -336,7 +341,8 @@ docs/contracts.md / decisions.md / runbook.md / schemas.md
 study/                             # Obsidian study/ 笔记镜像（6 篇，脚本同步）
 scripts/
   setup.sh                         # 统一环境初始化
-  eval_sdhy_baseline.py            # SDHY 基线评测
+  eval_sdhy_baseline.py            # SDHY 自由识别适配基线
+  eval_sdhy_native.py              # SDHY 原生 target-aware 补跑（推荐口径）
   probe_xfyun_ise.py               # 讯飞 ISE 单条探针
   eval_xfyun_ise.py                # 讯飞 ISE 候选打分评测（缓存/续跑）
   analyze_detection_probe.py       # 检测 prompt 偏置分析
@@ -413,7 +419,8 @@ GitHub Actions 每次 push 执行 `uv sync --locked → ruff → pytest`（无�
 * **ISE 基线**：候选打分口径（非自由识别），已用 5,843/10,000 交互；成本是 Qwen 的
   18.8–150 倍（按任务），仅建议做小样本交叉验证；余额 4,157。
 * **SDHY 基线**：CPU fp32 与官方标定 cuda-fp16 不等价；自由识别是适配口径，
-  不能直接代表其产品能力。
+  不能代表其产品能力。原生 target-aware 模式已补跑（检测 F1 0.737/FPR 0.213，
+  弃权 73.6%），但未接全量/MFA/VOT；详见 `results-sdhy-native.md`。
 * **整句 pilot 的解释边界**（`sentence-v1`）：A 抽样来自 AISHELL-3 train 划分
   （可访问镜像无 test 拼音标注），特殊子集仅 6 条儿化；OMPAL 只有 3 位评分者、
   法语 L1 子集，B/C 结论只限定该 learner 集合；A/B/C 语料与 ground truth 不同、
